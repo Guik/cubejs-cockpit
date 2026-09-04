@@ -64,6 +64,12 @@ function getDb(): DatabaseSync {
   // claims in this project, confirmed live).
   addColumnIfMissing(db, "pre_aggregations_json", "TEXT");
   addColumnIfMissing(db, "security_context_json", "TEXT");
+  // cache_type: 'in-memory' | 'cube-store-cache' (QueryCache.js's own result
+  // cache, actually served) | 'pre-aggregation' | 'source' (cache missed,
+  // fetchNew() ran -- split the same way used_pre_aggregation already is) |
+  // NULL (never resolved -- most error types). See cube.js's forwarder for
+  // where each value comes from.
+  addColumnIfMissing(db, "cache_type", "TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_query_events_request_id ON query_events(request_id)`);
   return db;
 }
@@ -150,6 +156,38 @@ function takePreAggregationUsage(requestId: string | undefined): PreAggregationU
   return entry.list;
 }
 
+// Same bridging pattern as pendingPreAgg above, for QueryCache.js's own
+// events (see cube.js): 'Found in memory cache entry' fires when the
+// in-process memory cache serves the request outright (fastest path, skips
+// the persistent cache driver entirely); 'Using cache for' fires when the
+// persistent cache driver (Cube Store here, per CUBEJS_CUBESTORE_HOST) has
+// a live, non-renewing entry. Both can, in principle, fire more than once
+// per requestId (compareDateRange-style multi-query requests); 'in-memory'
+// never gets downgraded by a later 'cube-store-cache' signal for the same
+// request, since a genuinely fast in-memory hit is the more representative
+// tier for the whole request even if one sub-query happened to miss it.
+type CacheTier = "in-memory" | "cube-store-cache";
+const pendingCacheTier = new Map<string, { tier: CacheTier; recordedAt: number }>();
+
+function noteCacheTier(requestId: string | undefined, tier: CacheTier): void {
+  if (!requestId) return;
+  const existing = pendingCacheTier.get(requestId);
+  if (existing?.tier === "in-memory") return;
+  pendingCacheTier.set(requestId, { tier, recordedAt: Date.now() });
+}
+
+function takeCacheTier(requestId: string | undefined): CacheTier | undefined {
+  const cutoff = Date.now() - PENDING_TTL_MS;
+  for (const [key, entry] of pendingCacheTier) {
+    if (entry.recordedAt < cutoff) pendingCacheTier.delete(key);
+  }
+  if (!requestId) return undefined;
+  const entry = pendingCacheTier.get(requestId);
+  if (!entry) return undefined;
+  pendingCacheTier.delete(requestId);
+  return entry.tier;
+}
+
 export function insertEvent(ev: IngestEvent): void {
   const database = getDb();
 
@@ -163,6 +201,18 @@ export function insertEvent(ev: IngestEvent): void {
     return;
   }
 
+  // Cache-tier signals (see cube.js): buffered the same way as 'Load
+  // Request SQL' above, consumed below at row-insert time rather than
+  // creating their own row.
+  if (ev.type === "Found in memory cache entry") {
+    noteCacheTier(ev.requestId, "in-memory");
+    return;
+  }
+  if (ev.type === "Using cache for") {
+    noteCacheTier(ev.requestId, "cube-store-cache");
+    return;
+  }
+
   const durationMs = Math.max(0, Math.round(ev.durationMs ?? 0));
   const completedAt = new Date();
   const startedAt = new Date(completedAt.getTime() - durationMs);
@@ -171,11 +221,20 @@ export function insertEvent(ev: IngestEvent): void {
   // itself, so this is effectively always the buffered path -- kept as a
   // direct fallback for forward compatibility rather than removed).
   const preAggregations = takePreAggregationUsage(ev.requestId) ?? ev.preAggregationsUsed;
+  // Cache type: a buffered tier (in-memory/cube-store-cache) means the
+  // request never even reached fetchNew(); no tier means it did, so fall
+  // back to the (already-resolved) pre-aggregation signal to split
+  // "pre-aggregation" from "source" -- same reasoning as used_pre_aggregation
+  // above. Stays null when preAggregations itself is unresolved (most error
+  // rows), rather than guessing.
+  const cacheTier = takeCacheTier(ev.requestId);
+  const cacheType =
+    cacheTier ?? (preAggregations === undefined ? null : preAggregations.length > 0 ? "pre-aggregation" : "source");
   database
     .prepare(
       `INSERT INTO query_events
-        (request_id, type, status, duration_ms, started_at, completed_at, api_type, organisation_id, user_id, query_json, error_message, used_pre_aggregation, pre_aggregations_json, security_context_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (request_id, type, status, duration_ms, started_at, completed_at, api_type, organisation_id, user_id, query_json, error_message, used_pre_aggregation, pre_aggregations_json, security_context_json, cache_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       ev.requestId ?? null,
@@ -191,7 +250,8 @@ export function insertEvent(ev: IngestEvent): void {
       ev.error ?? null,
       preAggregations === undefined ? null : preAggregations.length > 0 ? 1 : 0,
       preAggregations !== undefined ? JSON.stringify(preAggregations) : null,
-      ev.securityContext !== undefined ? JSON.stringify(ev.securityContext) : null
+      ev.securityContext !== undefined ? JSON.stringify(ev.securityContext) : null,
+      cacheType
     );
   pruneOld(database);
 }
@@ -220,6 +280,9 @@ export interface QueryEventRow {
   // rows the caller only lists, never opens.
   preAggregationsJson: string | null;
   securityContextJson: string | null;
+  // 'in-memory' | 'cube-store-cache' | 'pre-aggregation' | 'source' | null
+  // (unresolved -- most error rows). See the long comment on takeCacheTier.
+  cacheType: string | null;
 }
 
 const SELECT_COLUMNS = `
@@ -228,7 +291,8 @@ const SELECT_COLUMNS = `
   organisation_id as organisationId, user_id as userId,
   query_json as queryJson, error_message as errorMessage,
   used_pre_aggregation as usedPreAggregation, served_stale_cache as servedStaleCache,
-  pre_aggregations_json as preAggregationsJson, security_context_json as securityContextJson
+  pre_aggregations_json as preAggregationsJson, security_context_json as securityContextJson,
+  cache_type as cacheType
 `;
 
 export interface ListParams {
@@ -323,4 +387,36 @@ export function statsBuckets(sinceMinutes: number): StatsBucket[] {
        ORDER BY bucket ASC`
     )
     .all(bucketSeconds, bucketSeconds, since) as unknown as StatsBucket[];
+}
+
+export interface CacheStatsBucket {
+  bucket: string;
+  cacheType: string;
+  count: number;
+  avgDurationMs: number;
+}
+
+// One row per (bucket, cacheType) pair -- the frontend pivots this into one
+// row per bucket for the stacked/multi-line charts. Rows with an unresolved
+// cache_type (most error types -- see takeCacheTier) are excluded rather
+// than lumped into a synthetic "unknown" series: they were never actually
+// classified into any of the four real tiers, so charting them as a tier
+// would misrepresent what's genuinely known.
+export function cacheStatsBuckets(sinceMinutes: number): CacheStatsBucket[] {
+  const database = getDb();
+  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  return database
+    .prepare(
+      `SELECT
+         datetime((CAST(strftime('%s', completed_at) AS INTEGER) / CAST(? AS INTEGER)) * CAST(? AS INTEGER), 'unixepoch') as bucket,
+         cache_type as cacheType,
+         COUNT(*) as count,
+         AVG(duration_ms) as avgDurationMs
+       FROM query_events
+       WHERE completed_at >= ? AND cache_type IS NOT NULL
+       GROUP BY bucket, cacheType
+       ORDER BY bucket ASC`
+    )
+    .all(bucketSeconds, bucketSeconds, since) as unknown as CacheStatsBucket[];
 }

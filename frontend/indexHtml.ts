@@ -73,6 +73,10 @@ export const INDEX_HTML = `<!doctype html>
   /* Hand-rolled SVG charts -- no charting library, same reasoning as the
      hand-rolled JS/JSON highlighters below. */
   .charts-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+  .chart-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: #9aa4b2; }
+  .chart-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .chart-legend-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+  .compile-note { font-size: 12px; color: #6b7280; margin: -10px 0 20px; }
   .chart-card { border: 1px solid #23262b; border-radius: 10px; padding: 14px 16px; flex: 1; min-width: 320px; }
   .chart-card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; font-weight: 500; }
   .chart-card svg { display: block; width: 100%; height: auto; }
@@ -137,6 +141,7 @@ export const INDEX_HTML = `<!doctype html>
     <button data-tab="model" class="active">Data model</button>
     <button data-tab="preaggs">Pre-aggregations</button>
     <button data-tab="queries">Query history</button>
+    <button data-tab="performance">Performance</button>
   </nav>
 </header>
 <main>
@@ -170,6 +175,13 @@ export const INDEX_HTML = `<!doctype html>
     <h2>Queries</h2>
     <div id="query-filter-host"></div>
     <div id="query-table-host" class="loading">Loading&hellip;</div>
+  </section>
+  <section id="performance">
+    <div id="perf-timerange-host"></div>
+    <h2>Cache &amp; pre-aggregation performance</h2>
+    <div id="perf-charts-host" class="loading">Loading&hellip;</div>
+    <h2>Data model compilation</h2>
+    <div id="perf-compile-charts-host" class="loading">Loading&hellip;</div>
   </section>
 </main>
 
@@ -785,6 +797,172 @@ function renderLineChart(host, buckets, valueFn, color, formatValue, titleText) 
   host.append(card);
 }
 
+// Cache-type series shared by the two multi-series charts below. Order
+// matters: drawn/stacked bottom-to-top in this order, so the "best case"
+// tiers (in-memory, then the persistent Cube-Store-backed cache) sit at the
+// bottom of the stack and 'source' (the slow, no-cache path) on top --
+// reads as "how much of this is the fast path" at a glance.
+const CACHE_TYPE_ORDER = ['in-memory', 'cube-store-cache', 'pre-aggregation', 'source'];
+const CACHE_TYPE_LABELS = {
+  'in-memory': 'In-memory cache',
+  'cube-store-cache': 'Cube Store cache',
+  'pre-aggregation': 'Pre-aggregation',
+  'source': 'Source (no cache)',
+};
+const CACHE_TYPE_COLORS = {
+  'in-memory': '#86efac',
+  'cube-store-cache': '#93c5fd',
+  'pre-aggregation': '#7dd3fc',
+  'source': '#fdba74',
+};
+
+// The API returns one row per (bucket, cacheType) pair -- pivot into one
+// row per bucket timestamp, each cache type keyed on it, so the stacked/
+// multi-line charts can walk a single ordered bucket list the same way the
+// single-series charts above do.
+function pivotCacheBuckets(rows) {
+  const byBucket = new Map();
+  for (const r of rows) {
+    if (!byBucket.has(r.bucket)) byBucket.set(r.bucket, { bucket: r.bucket });
+    byBucket.get(r.bucket)[r.cacheType] = { count: r.count, avgDurationMs: r.avgDurationMs };
+  }
+  return [...byBucket.values()].sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
+}
+
+function chartLegend(seriesKeys, colorMap, labelMap) {
+  return el('div', { class: 'chart-legend' }, seriesKeys.map(k => el('span', { class: 'chart-legend-item' }, [
+    el('span', { class: 'chart-legend-swatch', style: 'background:' + colorMap[k] }, []),
+    labelMap[k],
+  ])));
+}
+
+// Same fixed-width-bar approach as renderBarChart, stacking each bucket's
+// series on top of each other instead of drawing a single value.
+function renderStackedBarChart(host, buckets, seriesKeys, colorMap, labelMap, titleText) {
+  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
+  if (!buckets.length) {
+    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
+    host.append(card);
+    return;
+  }
+  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
+  const plotHeight = height - padTop - padBottom;
+  const totals = buckets.map(b => seriesKeys.reduce((s, k) => s + (b[k] ? b[k].count : 0), 0));
+  const max = Math.max.apply(null, totals.concat([1]));
+  const slot = (width - padSide * 2) / buckets.length;
+  const barWidth = Math.min(slot * 0.6, 48);
+  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
+
+  svg.append(svgEl('line', {
+    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
+    stroke: '#23262b', 'stroke-width': 1,
+  }));
+
+  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
+
+  buckets.forEach((b, i) => {
+    const slotX = padSide + i * slot;
+    const x = slotX + (slot - barWidth) / 2;
+    let yCursor = height - padBottom;
+    for (const key of seriesKeys) {
+      const count = b[key] ? b[key].count : 0;
+      if (!count) continue;
+      const segHeight = Math.max((count / max) * plotHeight, 1);
+      const y = yCursor - segHeight;
+      const rect = svgEl('rect', { x: x, y: y, width: barWidth, height: segHeight, fill: colorMap[key] });
+      const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      titleNode.textContent = b.bucket + ' \\u00b7 ' + labelMap[key] + ': ' + count;
+      rect.append(titleNode);
+      svg.append(rect);
+      yCursor = y;
+    }
+    if (i % labelStride === 0) {
+      const xLabel = svgEl('text', {
+        x: slotX + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
+      });
+      xLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      svg.append(xLabel);
+    }
+  });
+
+  card.append(svg);
+  card.append(chartLegend(seriesKeys, colorMap, labelMap));
+  host.append(card);
+}
+
+// Same axes/padding as renderLineChart, one path per series. Paths break
+// (rather than interpolate) across a bucket where that series had zero
+// requests -- a straight line through a gap would imply a response time
+// that was never actually observed.
+function renderMultiLineChart(host, buckets, seriesKeys, colorMap, labelMap, formatValue, titleText) {
+  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
+  if (!buckets.length) {
+    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
+    host.append(card);
+    return;
+  }
+  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
+  const plotHeight = height - padTop - padBottom;
+  const allValues = [];
+  for (const b of buckets) for (const k of seriesKeys) if (b[k]) allValues.push(b[k].avgDurationMs);
+  const max = Math.max.apply(null, allValues.concat([1]));
+  const slot = (width - padSide * 2) / buckets.length;
+  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
+
+  svg.append(svgEl('line', {
+    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
+    stroke: '#23262b', 'stroke-width': 1,
+  }));
+
+  for (const key of seriesKeys) {
+    const points = buckets.map((b, i) => {
+      const entry = b[key];
+      if (!entry) return null;
+      const x = padSide + i * slot + slot / 2;
+      const y = height - padBottom - (max > 0 ? (entry.avgDurationMs / max) * plotHeight : 0);
+      return { x: x, y: y, v: entry.avgDurationMs, bucket: b.bucket };
+    });
+
+    let pathD = '';
+    let started = false;
+    for (const p of points) {
+      if (!p) { started = false; continue; }
+      pathD += (started ? ' L' : ' M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1);
+      started = true;
+    }
+    if (pathD) {
+      svg.append(svgEl('path', {
+        d: pathD.trim(), fill: 'none', stroke: colorMap[key], 'stroke-width': 2,
+        'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      }));
+    }
+
+    points.forEach(p => {
+      if (!p) return;
+      const dot = svgEl('circle', { cx: p.x, cy: p.y, r: 2.5, fill: colorMap[key] });
+      const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      titleNode.textContent = p.bucket + ' \\u00b7 ' + labelMap[key] + ': ' + formatValue(p.v);
+      dot.append(titleNode);
+      svg.append(dot);
+    });
+  }
+
+  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
+  buckets.forEach((b, i) => {
+    if (i % labelStride === 0) {
+      const xLabel = svgEl('text', {
+        x: padSide + i * slot + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
+      });
+      xLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      svg.append(xLabel);
+    }
+  });
+
+  card.append(svg);
+  card.append(chartLegend(seriesKeys, colorMap, labelMap));
+  host.append(card);
+}
+
 // --- Time range selector (drives both the charts and the table below) ---
 
 const TIME_RANGES = [
@@ -811,8 +989,20 @@ function currentRangeLabel() {
   return match ? match.label : (queryTimeRangeMinutes + 'm');
 }
 
-function renderTimeRangeBar() {
-  const host = document.getElementById('query-timerange-host');
+// Shared across tabs (query history + performance both key off the same
+// queryTimeRangeMinutes): each renders its own bar into its own host, but a
+// click on either re-renders both bars and re-fires every registered
+// loader, rather than each tab keeping an independent range.
+const TIME_RANGE_BAR_HOSTS = ['query-timerange-host', 'perf-timerange-host'];
+const TIME_RANGE_LISTENERS = [];
+
+function onTimeRangeChange(fn) {
+  TIME_RANGE_LISTENERS.push(fn);
+}
+
+function renderTimeRangeBar(hostId) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
   host.innerHTML = '';
   const bar = el('div', { class: 'timerange-bar' });
   for (const range of TIME_RANGES) {
@@ -821,9 +1011,8 @@ function renderTimeRangeBar() {
     btn.addEventListener('click', () => {
       queryTimeRangeMinutes = range.minutes;
       try { localStorage.setItem('qh-timerange-minutes', String(range.minutes)); } catch (e) { /* ignore */ }
-      renderTimeRangeBar();
-      loadQueryCharts();
-      loadQueryTable();
+      TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+      TIME_RANGE_LISTENERS.forEach(fn => fn());
     });
     bar.append(btn);
   }
@@ -843,6 +1032,52 @@ async function loadQueryCharts() {
   } catch (e) {
     host.innerHTML = '';
     host.append(errBox(e));
+  }
+}
+
+// --- Performance tab: cache-type breakdown + data model compilation ---
+//
+// Only these four metrics -- see the plan: the other four (Cube Store
+// worker saturation/wait time for queries and jobs) have no OSS signal at
+// all, confirmed by reading the pinned image's source and cubestored
+// binary directly, so they're not implemented rather than faked.
+
+async function loadPerformanceCharts() {
+  const cacheHost = document.getElementById('perf-charts-host');
+  const compileHost = document.getElementById('perf-compile-charts-host');
+  try {
+    const [cacheData, compileData] = await Promise.all([
+      getJSON('/api/query-history/cache-stats?sinceMinutes=' + queryTimeRangeMinutes),
+      getJSON('/api/performance/compile-stats?sinceMinutes=' + queryTimeRangeMinutes),
+    ]);
+
+    const cacheBuckets = pivotCacheBuckets(cacheData.buckets || []);
+    cacheHost.innerHTML = '';
+    const cacheRow = el('div', { class: 'charts-row' });
+    cacheHost.append(cacheRow);
+    renderStackedBarChart(cacheRow, cacheBuckets, CACHE_TYPE_ORDER, CACHE_TYPE_COLORS, CACHE_TYPE_LABELS, 'Requests by cache type (last ' + currentRangeLabel() + ')');
+    renderMultiLineChart(cacheRow, cacheBuckets, CACHE_TYPE_ORDER, CACHE_TYPE_COLORS, CACHE_TYPE_LABELS, v => fmtMs(Math.round(v)), 'Avg response time by cache type (last ' + currentRangeLabel() + ')');
+
+    const compileBuckets = compileData.buckets || [];
+    compileHost.innerHTML = '';
+    const compileRow = el('div', { class: 'charts-row' });
+    compileHost.append(compileRow);
+    renderBarChart(compileRow, compileBuckets, b => b.count, '#c4b5fd', v => String(v) + ' compiles', 'Data model compilations (last ' + currentRangeLabel() + ')');
+    renderLineChart(compileRow, compileBuckets, b => b.avgDurationMs || 0, '#fdba74', v => fmtMs(Math.round(v)), 'Wait time for data model compilation (last ' + currentRangeLabel() + ')');
+
+    const totalCompiles = compileBuckets.reduce((s, b) => s + b.count, 0);
+    const totalErrors = compileBuckets.reduce((s, b) => s + (b.errorCount || 0), 0);
+    compileHost.append(el('div', { class: 'compile-note' }, [
+      totalCompiles
+        ? (totalCompiles + ' schema compilation' + (totalCompiles === 1 ? '' : 's') + ' in this window' +
+           (totalErrors ? ' (' + totalErrors + ' failed)' : '') +
+           ' -- compilers are cached after the first one, so this only fires again on a schema-version change (redeploy) or a slow renew.')
+        : 'No schema compilations in this window -- expected for a stable deployment: compilers stay cached until the schema version changes.',
+    ]));
+  } catch (e) {
+    cacheHost.innerHTML = '';
+    cacheHost.append(errBox(e));
+    compileHost.innerHTML = '';
   }
 }
 
@@ -1104,10 +1339,14 @@ loadModelMeta();
 loadModelFiles();
 loadPreAggregations();
 loadBuildHistory();
-renderTimeRangeBar();
+TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+onTimeRangeChange(loadQueryCharts);
+onTimeRangeChange(loadQueryTable);
+onTimeRangeChange(loadPerformanceCharts);
 loadQueryCharts();
 renderQueryFilterBar();
 loadQueryTable();
+loadPerformanceCharts();
 </script>
 </body>
 </html>

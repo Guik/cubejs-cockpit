@@ -1,5 +1,5 @@
 import { api } from "encore.dev/api";
-import { insertEvent, listEvents, getEventById, statsBuckets, IngestEvent } from "./db";
+import { insertEvent, listEvents, getEventById, statsBuckets, cacheStatsBuckets, IngestEvent } from "./db";
 
 // api.raw throughout, matching preaggregations/api.ts's established
 // pattern in this project: query-string/body parsing done by hand rather
@@ -58,6 +58,15 @@ export const stats = api.raw(
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
     sendJson(resp, 200, { buckets: statsBuckets(sinceMinutes) });
+  }
+);
+
+export const cacheStats = api.raw(
+  { expose: true, method: "GET", path: "/api/query-history/cache-stats" },
+  async (req, resp) => {
+    const url = new URL(req.url || "", "http://internal");
+    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
+    sendJson(resp, 200, { buckets: cacheStatsBuckets(sinceMinutes) });
   }
 );
 
