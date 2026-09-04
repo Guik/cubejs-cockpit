@@ -114,6 +114,16 @@ export const INDEX_HTML = `<!doctype html>
   .field-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; margin-bottom: 16px; }
   .field-grid dt { color: #6b7280; }
   .field-grid dd { margin: 0; }
+  .stat-tiles { display: flex; gap: 10px; margin-bottom: 18px; }
+  .stat-tile { flex: 1; min-width: 0; border: 1px solid #23262b; border-radius: 10px; padding: 10px 14px; }
+  .stat-tile .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin-bottom: 5px; }
+  .stat-tile .stat-value { font-size: 16px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat-tile .stat-value .pill { font-size: 13px; }
+  .overlay-subnav { display: flex; gap: 4px; border-bottom: 1px solid #23262b; margin-bottom: 14px; }
+  .overlay-subnav button { background: none; border: none; color: #9aa4b2; padding: 6px 4px; margin-right: 14px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; }
+  .overlay-subnav button.active { color: #fff; border-bottom-color: #4ade80; }
+  .overlay-subpanel { display: none; }
+  .overlay-subpanel.active { display: block; }
   details { border: 1px solid #23262b; border-radius: 8px; margin-top: 8px; }
   summary { padding: 8px 12px; cursor: pointer; font-size: 13px; }
   details[open] summary { border-bottom: 1px solid #23262b; }
@@ -885,17 +895,65 @@ function sourcePill(row) {
   return pills;
 }
 
+function statTile(label, valueNode) {
+  return el('div', { class: 'stat-tile' }, [
+    el('div', { class: 'stat-label' }, [label]),
+    el('div', { class: 'stat-value' }, Array.isArray(valueNode) ? valueNode : [valueNode]),
+  ]);
+}
+
+// Parses the JSON array db.ts stores (see PreAggregationUsed in
+// dashboard/queryhistory/db.ts) -- [] means "resolved, hit source
+// directly" (a real answer), not "not captured"; only a genuinely absent
+// field means unknown.
+function parsePreAggregationsUsed(row) {
+  if (!row.preAggregationsJson) return [];
+  try {
+    return JSON.parse(row.preAggregationsJson);
+  } catch (e) {
+    return [];
+  }
+}
+
 function openQueryOverlay(row) {
   document.getElementById('overlay-title').textContent = row.requestId || ('Query #' + row.id);
   const body = document.getElementById('overlay-body');
   body.innerHTML = '';
 
+  // --- Key metrics, up top and prominent (not buried in the field list
+  // below) -- the four things you'd actually glance at first. ---
+  body.append(el('div', { class: 'stat-tiles' }, [
+    statTile('Status', el('span', { class: 'pill status-' + row.status }, [row.status])),
+    statTile('Duration', fmtMs(row.durationMs)),
+    statTile('Source', sourcePill(row)),
+    statTile('Started at', fmtDate(row.startedAt)),
+  ]));
+
+  // --- Sub-tabs: everything else, grouped rather than one long scroll. ---
+  const tabDefs = [
+    ['overview', 'Overview'],
+    ['preaggs', 'Pre-aggregations'],
+    ['security', 'Security context'],
+  ];
+  const panels = {};
+  const subnav = el('div', { class: 'overlay-subnav' });
+  tabDefs.forEach(([key, label], i) => {
+    const btn = el('button', {}, [label]);
+    if (i === 0) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      subnav.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      Object.entries(panels).forEach(([k, p]) => p.classList.toggle('active', k === key));
+    });
+    subnav.append(btn);
+  });
+  body.append(subnav);
+
+  // Overview: the rest of the identifying fields, error (if any), full query.
+  const overviewPanel = el('div', { class: 'overlay-subpanel active' });
   const dl = el('dl', { class: 'field-grid' });
   const fields = [
-    ['Status', row.status],
     ['Type', row.type],
-    ['Duration', fmtMs(row.durationMs)],
-    ['Started at', fmtDate(row.startedAt)],
     ['Completed at', fmtDate(row.completedAt)],
     ['API type', row.apiType || ''],
     ['Organisation ID', row.organisationId || ''],
@@ -906,18 +964,50 @@ function openQueryOverlay(row) {
     if (!value) continue;
     dl.append(el('dt', null, [label]), el('dd', null, [String(value)]));
   }
-  dl.append(el('dt', null, ['Source']), el('dd', null, sourcePill(row)));
-  body.append(dl);
-
+  overviewPanel.append(dl);
   if (row.errorMessage) {
-    body.append(el('div', { class: 'muted' }, ['Error:']));
-    body.append(el('pre', null, [row.errorMessage]));
+    overviewPanel.append(el('div', { class: 'muted' }, ['Error:']));
+    overviewPanel.append(el('pre', null, [row.errorMessage]));
   }
+  overviewPanel.append(el('div', { class: 'muted' }, ['Query:']));
+  const queryPre = el('pre', null, []);
+  queryPre.innerHTML = highlightJson(row.queryJson || '{}', true);
+  overviewPanel.append(queryPre);
+  panels.overview = overviewPanel;
+  body.append(overviewPanel);
 
-  body.append(el('div', { class: 'muted' }, ['Query:']));
-  const pre = el('pre', null, []);
-  pre.innerHTML = highlightJson(row.queryJson || '{}', true);
-  body.append(pre);
+  // Pre-aggregations: which rollup(s), if any, actually served this query --
+  // distinct from the Source pill above, which only says yes/no.
+  const preaggPanel = el('div', { class: 'overlay-subpanel' });
+  const preaggList = parsePreAggregationsUsed(row);
+  if (row.usedPreAggregation === null) {
+    preaggPanel.append(el('div', { class: 'muted' }, ['Unknown \\u2014 this query never resolved far enough to tell (most error types).']));
+  } else if (!preaggList.length) {
+    preaggPanel.append(el('div', { class: 'muted' }, ['None \\u2014 this query hit the source database directly.']));
+  } else {
+    preaggPanel.append(el('table', null, [
+      el('tr', null, [el('th', null, ['Pre-aggregation']), el('th', null, ['Table'])]),
+      ...preaggList.map(p => el('tr', null, [
+        el('td', null, [p.id || '']),
+        el('td', { class: 'mono' }, [shortTableName(p.tableName || '')]),
+      ])),
+    ]));
+  }
+  panels.preaggs = preaggPanel;
+  body.append(preaggPanel);
+
+  // Security context: the full JWT claims cube.js's queryRewrite saw for
+  // this request, not just the org/user id already pulled out above.
+  const securityPanel = el('div', { class: 'overlay-subpanel' });
+  if (row.securityContextJson) {
+    const secPre = el('pre', null, []);
+    secPre.innerHTML = highlightJson(row.securityContextJson, true);
+    securityPanel.append(secPre);
+  } else {
+    securityPanel.append(el('div', { class: 'muted' }, ['Not captured for this query.']));
+  }
+  panels.security = securityPanel;
+  body.append(securityPanel);
 
   document.getElementById('overlay-backdrop').hidden = false;
 }

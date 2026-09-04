@@ -55,8 +55,22 @@ function getDb(): DatabaseSync {
   // far enough to resolve pre-aggregations), 0/1 once known.
   addColumnIfMissing(db, "used_pre_aggregation", "INTEGER");
   addColumnIfMissing(db, "served_stale_cache", "INTEGER NOT NULL DEFAULT 0");
+  // pre_aggregations_json: JSON array of {id, tableName}, e.g.
+  // [{"id":"Agg.preAggStation","tableName":"prod_pre_aggregations.agg_pre_agg_station"}] --
+  // [] (not null) once resolved-but-empty (a genuine source-scan query),
+  // null only when never resolved (most error types). security_context_json
+  // is the full JWT claims object cube.js's queryRewrite saw for this
+  // request (iat/exp/nbf/iss/user_id/organisation_id -- no extra custom
+  // claims in this project, confirmed live).
+  addColumnIfMissing(db, "pre_aggregations_json", "TEXT");
+  addColumnIfMissing(db, "security_context_json", "TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_query_events_request_id ON query_events(request_id)`);
   return db;
+}
+
+export interface PreAggregationUsed {
+  id: string;
+  tableName: string;
 }
 
 export interface IngestEvent {
@@ -66,9 +80,10 @@ export interface IngestEvent {
   apiType?: string;
   organisationId?: string;
   userId?: string;
+  securityContext?: unknown;
   query?: unknown;
   error?: string;
-  usedPreAggregation?: boolean;
+  preAggregationsUsed?: PreAggregationUsed[];
   servedStaleCache?: boolean;
 }
 
@@ -108,23 +123,22 @@ function flagStaleCache(database: DatabaseSync, requestId: string | undefined): 
 // near-simultaneous events for the same in-flight request, nothing here
 // needs to survive a restart. A request can generate more than one 'Load
 // Request SQL' (compareDateRange-style multi-query requests), hence
-// OR-combining rather than overwriting.
-const pendingPreAgg = new Map<string, { usedPreAggregation: boolean; recordedAt: number }>();
+// union-by-id rather than overwriting.
+const pendingPreAgg = new Map<string, { list: PreAggregationUsed[]; recordedAt: number }>();
 const PENDING_TTL_MS = 60_000;
 
-function notePreAggregationUsage(requestId: string | undefined, used: boolean): void {
+function notePreAggregationUsage(requestId: string | undefined, used: PreAggregationUsed[]): void {
   if (!requestId) return;
   const existing = pendingPreAgg.get(requestId);
-  pendingPreAgg.set(requestId, {
-    usedPreAggregation: (existing?.usedPreAggregation ?? false) || used,
-    recordedAt: Date.now(),
-  });
+  const merged = new Map((existing?.list ?? []).map((p) => [p.id, p]));
+  for (const p of used) merged.set(p.id, p);
+  pendingPreAgg.set(requestId, { list: [...merged.values()], recordedAt: Date.now() });
 }
 
 // Consumes (removes) any buffered signal for this requestId. Also sweeps
 // stale entries -- e.g. a 'Load Request SQL' whose completion event never
 // arrived (process crash, dropped POST) -- so this can't grow unbounded.
-function takePreAggregationUsage(requestId: string | undefined): boolean | undefined {
+function takePreAggregationUsage(requestId: string | undefined): PreAggregationUsed[] | undefined {
   const cutoff = Date.now() - PENDING_TTL_MS;
   for (const [key, entry] of pendingPreAgg) {
     if (entry.recordedAt < cutoff) pendingPreAgg.delete(key);
@@ -133,14 +147,14 @@ function takePreAggregationUsage(requestId: string | undefined): boolean | undef
   const entry = pendingPreAgg.get(requestId);
   if (!entry) return undefined;
   pendingPreAgg.delete(requestId);
-  return entry.usedPreAggregation;
+  return entry.list;
 }
 
 export function insertEvent(ev: IngestEvent): void {
   const database = getDb();
 
   if (ev.type === "Load Request SQL") {
-    notePreAggregationUsage(ev.requestId, Boolean(ev.usedPreAggregation));
+    notePreAggregationUsage(ev.requestId, ev.preAggregationsUsed ?? []);
     return;
   }
 
@@ -153,15 +167,15 @@ export function insertEvent(ev: IngestEvent): void {
   const completedAt = new Date();
   const startedAt = new Date(completedAt.getTime() - durationMs);
   // Prefer the buffered 'Load Request SQL' signal (reliable, see above)
-  // over ev.usedPreAggregation (cube.js only sets that on non-SQL events
-  // as a fallback, currently never -- kept as a fallback for forward
-  // compatibility rather than removed).
-  const usedPreAggregation = takePreAggregationUsage(ev.requestId) ?? ev.usedPreAggregation;
+  // over ev.preAggregationsUsed (cube.js only sets that on the SQL event
+  // itself, so this is effectively always the buffered path -- kept as a
+  // direct fallback for forward compatibility rather than removed).
+  const preAggregations = takePreAggregationUsage(ev.requestId) ?? ev.preAggregationsUsed;
   database
     .prepare(
       `INSERT INTO query_events
-        (request_id, type, status, duration_ms, started_at, completed_at, api_type, organisation_id, user_id, query_json, error_message, used_pre_aggregation)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (request_id, type, status, duration_ms, started_at, completed_at, api_type, organisation_id, user_id, query_json, error_message, used_pre_aggregation, pre_aggregations_json, security_context_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       ev.requestId ?? null,
@@ -175,7 +189,9 @@ export function insertEvent(ev: IngestEvent): void {
       ev.userId ?? null,
       ev.query !== undefined ? JSON.stringify(ev.query) : null,
       ev.error ?? null,
-      usedPreAggregation === undefined ? null : usedPreAggregation ? 1 : 0
+      preAggregations === undefined ? null : preAggregations.length > 0 ? 1 : 0,
+      preAggregations !== undefined ? JSON.stringify(preAggregations) : null,
+      ev.securityContext !== undefined ? JSON.stringify(ev.securityContext) : null
     );
   pruneOld(database);
 }
@@ -198,6 +214,12 @@ export interface QueryEventRow {
   // false; only ever set true by a matching 'Slow Query Warning').
   usedPreAggregation: number | null;
   servedStaleCache: number;
+  // JSON-encoded PreAggregationUsed[] (see above) / raw JWT claims object;
+  // left as strings here, parsed on the frontend -- same pattern as
+  // queryJson/errorMessage, avoids a JSON.parse+reserialize round trip for
+  // rows the caller only lists, never opens.
+  preAggregationsJson: string | null;
+  securityContextJson: string | null;
 }
 
 const SELECT_COLUMNS = `
@@ -205,7 +227,8 @@ const SELECT_COLUMNS = `
   started_at as startedAt, completed_at as completedAt, api_type as apiType,
   organisation_id as organisationId, user_id as userId,
   query_json as queryJson, error_message as errorMessage,
-  used_pre_aggregation as usedPreAggregation, served_stale_cache as servedStaleCache
+  used_pre_aggregation as usedPreAggregation, served_stale_cache as servedStaleCache,
+  pre_aggregations_json as preAggregationsJson, security_context_json as securityContextJson
 `;
 
 export interface ListParams {
