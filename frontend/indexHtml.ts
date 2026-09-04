@@ -38,6 +38,18 @@ export const INDEX_HTML = `<!doctype html>
   .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; background: #1a1d22; color: #9aa4b2; margin-left: 6px; white-space: nowrap; }
   .pill.built { background: #123a20; color: #4ade80; }
   .pill.empty { background: #2a2113; color: #facc15; }
+  .pill.type-time { background: #2a1e3a; color: #c4b5fd; }
+  .pill.type-string { background: #123a2e; color: #5eead4; }
+  .pill.type-number { background: #1e2a3a; color: #7dd3fc; }
+  .pill.type-agg { background: #3a2313; color: #fdba74; }
+  .pill.type-other { background: #1a1d22; color: #9aa4b2; }
+
+  /* Hand-rolled JS syntax highlighting (schema source view) -- no
+     external highlighter dependency, keeps this a single embedded file. */
+  .tok-comment { color: #6b7280; font-style: italic; }
+  .tok-string { color: #a3e635; }
+  .tok-keyword { color: #7dd3fc; }
+  .tok-number { color: #fdba74; }
   .muted { color: #6b7280; }
   .err { color: #f87171; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
   .loading { color: #6b7280; font-size: 13px; }
@@ -152,6 +164,16 @@ function fmtDate(v) {
   return isNaN(d.getTime()) ? String(v) : d.toLocaleString();
 }
 
+// Aggregate types (sum/count/avg/...) vs. Cube's own value types
+// (string/number/time/boolean) get different pill colors so a cube's
+// shape reads at a glance, same idea as the built/no-data pills below.
+const AGG_TYPES = new Set(['sum', 'count', 'countDistinct', 'countDistinctApprox', 'avg', 'min', 'max', 'runningTotal']);
+function typePill(type) {
+  if (!type) return '';
+  const cls = AGG_TYPES.has(type) ? 'type-agg' : ['string', 'number', 'time'].includes(type) ? 'type-' + type : 'type-other';
+  return el('span', { class: 'pill ' + cls }, [type]);
+}
+
 // --- Data model tab ---
 
 async function loadModelMeta() {
@@ -167,7 +189,7 @@ async function loadModelMeta() {
         el('tr', null, [el('th', null, ['Measure']), el('th', null, ['Type']), el('th', null, ['Title'])]),
         ...(cube.measures || []).map(m => el('tr', null, [
           el('td', null, [el('code', null, [m.name])]),
-          el('td', null, [m.aggType || m.type || '']),
+          el('td', null, [typePill(m.aggType || m.type)]),
           el('td', null, [m.title || '']),
         ])),
       ]);
@@ -175,7 +197,7 @@ async function loadModelMeta() {
         el('tr', null, [el('th', null, ['Dimension']), el('th', null, ['Type']), el('th', null, ['Title'])]),
         ...(cube.dimensions || []).map(d => el('tr', null, [
           el('td', null, [el('code', null, [d.name])]),
-          el('td', null, [d.type || '']),
+          el('td', null, [typePill(d.type)]),
           el('td', null, [d.title || '']),
         ])),
       ]);
@@ -189,6 +211,28 @@ async function loadModelMeta() {
   }
 }
 
+// Small hand-rolled highlighter (comments, strings, numbers, a handful of
+// keywords) rather than pulling in an external library -- keeps this a
+// single embedded file with no runtime dependency on a CDN being
+// reachable. Escapes HTML first so the schema source can never inject
+// markup; the highlighter then only ever wraps already-safe text in spans.
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+const JS_KEYWORDS = new Set(['const', 'let', 'var', 'function', 'return', 'true', 'false', 'null', 'undefined', 'new', 'typeof']);
+
+function highlightJs(code) {
+  const pattern = /(\\/\\/[^\\n]*)|(\`[^\`]*\`|'[^']*'|"[^"]*")|(\\b\\d+(?:\\.\\d+)?\\b)|(\\b[A-Za-z_$][A-Za-z0-9_$]*\\b)/g;
+  return escapeHtml(code).replace(pattern, (m, comment, str, num, word) => {
+    if (comment) return '<span class="tok-comment">' + comment + '</span>';
+    if (str) return '<span class="tok-string">' + str + '</span>';
+    if (num) return '<span class="tok-number">' + num + '</span>';
+    if (word && JS_KEYWORDS.has(word)) return '<span class="tok-keyword">' + word + '</span>';
+    return m;
+  });
+}
+
 async function loadModelFiles() {
   const host = document.getElementById('model-files');
   try {
@@ -196,7 +240,9 @@ async function loadModelFiles() {
     host.innerHTML = '';
     for (const f of data.files || []) {
       host.append(el('h3', null, [f.name]));
-      host.append(el('pre', null, [f.content]));
+      const pre = el('pre', null, []);
+      pre.innerHTML = highlightJs(f.content);
+      host.append(pre);
     }
   } catch (e) {
     host.innerHTML = '';
