@@ -147,28 +147,29 @@ export function insertErrorEvent(ev: ErrorIngestEvent): void {
   pruneOldErrors(database);
 }
 
-export interface ErrorEventRow {
-  id: number;
+export interface ErrorStatsBucket {
+  bucket: string;
   kind: string;
-  type: string | null;
-  requestId: string | null;
-  context: string | null;
-  errorMessage: string | null;
-  occurredAt: string;
+  count: number;
 }
 
-export function listErrorEvents(sinceMinutes: number, limit = 100): ErrorEventRow[] {
+// One row per (bucket, kind) pair, same shape as queryhistory's
+// cacheStatsBuckets/apiTypeStatsBuckets -- the frontend pivots and charts
+// it the same way, rather than listing individual error rows.
+export function errorStatsBuckets(sinceMinutes: number): ErrorStatsBucket[] {
   const database = getDb();
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  const bucketSeconds = bucketSecondsFor(sinceMinutes);
   return database
     .prepare(
       `SELECT
-         id, kind, type, request_id as requestId, context,
-         error_message as errorMessage, occurred_at as occurredAt
+         datetime((CAST(strftime('%s', occurred_at) AS INTEGER) / CAST(? AS INTEGER)) * CAST(? AS INTEGER), 'unixepoch') as bucket,
+         kind,
+         COUNT(*) as count
        FROM error_events
        WHERE occurred_at >= ?
-       ORDER BY occurred_at DESC
-       LIMIT ?`
+       GROUP BY bucket, kind
+       ORDER BY bucket ASC`
     )
-    .all(since, Math.min(Math.max(limit, 1), 500)) as unknown as ErrorEventRow[];
+    .all(bucketSeconds, bucketSeconds, since) as unknown as ErrorStatsBucket[];
 }

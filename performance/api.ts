@@ -4,7 +4,7 @@ import {
   compileStatsBuckets,
   CompileIngestEvent,
   insertErrorEvent,
-  listErrorEvents,
+  errorStatsBuckets,
   ErrorIngestEvent,
 } from "./db";
 
@@ -63,12 +63,11 @@ export const errorIngest = api.raw(
   }
 );
 
-export const errors = api.raw(
-  { expose: true, method: "GET", path: "/api/performance/errors" },
+export const errorStats = api.raw(
+  { expose: true, method: "GET", path: "/api/performance/error-stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 100;
-    sendJson(resp, 200, { rows: listErrorEvents(sinceMinutes, limit) });
+    sendJson(resp, 200, { buckets: errorStatsBuckets(sinceMinutes) });
   }
 );

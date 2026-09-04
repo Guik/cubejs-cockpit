@@ -63,8 +63,6 @@ export const INDEX_HTML = `<!doctype html>
   .pill.source-scan { background: #3a2313; color: #fdba74; }
   .pill.source-unknown { background: #1a1d22; color: #6b7280; }
   .pill.cache-stale { background: #3a3313; color: #fde68a; margin-left: 4px; }
-  .pill.kind-auth { background: #3a1e2e; color: #f9a8d4; }
-  .pill.kind-preagg-build { background: #3a2313; color: #fdba74; }
   .json-key { color: #93c5fd; }
   .json-string { color: #86efac; }
   .json-number { color: #fdba74; }
@@ -1141,36 +1139,33 @@ async function loadPerformanceMixCharts() {
 // Structurally distinct from the query_events-backed charts above: neither
 // event is tied to a completed, duration-bearing request (an auth failure
 // happens before a security context exists at all; a build job error comes
-// from a background refresh-worker job, not a live HTTP request) -- so
-// this is a plain recent-errors feed, not a bucketed chart. See cube.js
-// for why auth failures can't be matched by a fixed message string, and
-// why the raw bearer token is never forwarded here.
+// from a background refresh-worker job, not a live HTTP request) -- but
+// charted the same bucketed-count way as everything else on this tab. See
+// cube.js for why auth failures can't be matched by a fixed message
+// string, and why the raw bearer token is never forwarded here.
 
-function errorKindPill(kind) {
-  const label = kind === 'auth' ? 'auth' : 'pre-agg build';
-  return el('span', { class: 'pill kind-' + kind }, [label]);
+const ERROR_KIND_ORDER = ['auth', 'preagg-build'];
+const ERROR_KIND_LABELS = { 'auth': 'Auth failures', 'preagg-build': 'Pre-agg build errors' };
+const ERROR_KIND_COLORS = { 'auth': '#f9a8d4', 'preagg-build': '#fdba74' };
+
+function pivotErrorBuckets(rows) {
+  const byBucket = new Map();
+  for (const r of rows) {
+    if (!byBucket.has(r.bucket)) byBucket.set(r.bucket, { bucket: r.bucket });
+    byBucket.get(r.bucket)[r.kind] = { count: r.count };
+  }
+  return [...byBucket.values()].sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
 }
 
-async function loadErrorsList() {
+async function loadErrorCharts() {
   const host = document.getElementById('perf-errors-host');
   try {
-    const data = await getJSON('/api/performance/errors?sinceMinutes=' + queryTimeRangeMinutes + '&limit=100');
-    const rows = data.rows || [];
+    const data = await getJSON('/api/performance/error-stats?sinceMinutes=' + queryTimeRangeMinutes);
+    const buckets = pivotErrorBuckets(data.buckets || []);
     host.innerHTML = '';
-    if (!rows.length) {
-      host.append(el('div', { class: 'muted' }, ['No auth failures or pre-aggregation build errors in this window.']));
-      return;
-    }
-    const table = el('table', null, [
-      el('tr', null, [el('th', null, ['Time']), el('th', null, ['Kind']), el('th', null, ['Event']), el('th', null, ['Details'])]),
-      ...rows.map(r => el('tr', null, [
-        el('td', null, [fmtDate(r.occurredAt)]),
-        el('td', null, [errorKindPill(r.kind)]),
-        el('td', null, [el('code', null, [r.type || ''])]),
-        el('td', null, [r.errorMessage || (r.context ? r.context : '')]),
-      ])),
-    ]);
-    host.append(table);
+    const row = el('div', { class: 'charts-row' });
+    host.append(row);
+    renderStackedBarChart(row, buckets, ERROR_KIND_ORDER, ERROR_KIND_COLORS, ERROR_KIND_LABELS, 'Auth failures & pre-agg build errors (last ' + currentRangeLabel() + ')');
   } catch (e) {
     host.innerHTML = '';
     host.append(errBox(e));
@@ -1440,13 +1435,13 @@ onTimeRangeChange(loadQueryCharts);
 onTimeRangeChange(loadQueryTable);
 onTimeRangeChange(loadPerformanceCharts);
 onTimeRangeChange(loadPerformanceMixCharts);
-onTimeRangeChange(loadErrorsList);
+onTimeRangeChange(loadErrorCharts);
 loadQueryCharts();
 renderQueryFilterBar();
 loadQueryTable();
 loadPerformanceCharts();
 loadPerformanceMixCharts();
-loadErrorsList();
+loadErrorCharts();
 </script>
 </body>
 </html>
