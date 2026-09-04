@@ -23,6 +23,11 @@ export const INDEX_HTML = `<!doctype html>
   section.active { display: block; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin: 24px 0 10px; }
   h2:first-child { margin-top: 0; }
+  .subnav { display: flex; gap: 4px; border-bottom: 1px solid #23262b; margin-bottom: 16px; }
+  .subnav button { background: none; border: none; color: #9aa4b2; padding: 8px 4px; margin-right: 16px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; }
+  .subnav button.active { color: #fff; border-bottom-color: #4ade80; }
+  .subpanel { display: none; }
+  .subpanel.active { display: block; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c1f24; vertical-align: top; }
   th { color: #6b7280; font-weight: 500; }
@@ -82,7 +87,6 @@ export const INDEX_HTML = `<!doctype html>
   <nav>
     <button data-tab="model" class="active">Data model</button>
     <button data-tab="preaggs">Pre-aggregations</button>
-    <button data-tab="history">Build history</button>
   </nav>
 </header>
 <main>
@@ -93,15 +97,21 @@ export const INDEX_HTML = `<!doctype html>
     <div id="model-files" class="loading">Loading&hellip;</div>
   </section>
   <section id="preaggs">
-    <h2>Pre-aggregations &amp; partitions</h2>
-    <div id="preagg-filter-host"></div>
-    <div id="preagg-table-host" class="loading">Loading&hellip;</div>
-  </section>
-  <section id="history">
-    <h2>Build history</h2>
-    <div id="history-info-host"></div>
-    <div id="history-filter-host"></div>
-    <div id="history-list-host" class="loading">Loading&hellip;</div>
+    <div class="subnav">
+      <button data-subtab="partitions" class="active">Partitions</button>
+      <button data-subtab="history">Build history</button>
+    </div>
+    <div id="preaggs-partitions" class="subpanel active">
+      <h2>Pre-aggregations &amp; partitions</h2>
+      <div id="preagg-filter-host"></div>
+      <div id="preagg-table-host" class="loading">Loading&hellip;</div>
+    </div>
+    <div id="preaggs-history" class="subpanel">
+      <h2>Build history</h2>
+      <div id="history-info-host"></div>
+      <div id="history-filter-host"></div>
+      <div id="history-list-host" class="loading">Loading&hellip;</div>
+    </div>
   </section>
 </main>
 
@@ -517,6 +527,15 @@ document.querySelectorAll('nav button').forEach(btn => {
     document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById(btn.dataset.tab).classList.add('active');
+  });
+});
+
+document.querySelectorAll('.subnav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.subnav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.subpanel').forEach(s => s.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('preaggs-' + btn.dataset.subtab).classList.add('active');
   });
 });
 
