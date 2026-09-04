@@ -16,6 +16,19 @@ const RETENTION_DAYS = Number(process.env.QUERY_HISTORY_RETENTION_DAYS || 30);
 
 let db: DatabaseSync | null = null;
 
+// Lightweight migration for columns added after the table already existed
+// in production (query_events had 2 real rows before usedPreAggregation/
+// servedStaleCache were added) -- CREATE TABLE IF NOT EXISTS alone doesn't
+// alter an existing table. ALTER TABLE ADD COLUMN, ignoring "duplicate
+// column" if it's already there.
+function addColumnIfMissing(database: DatabaseSync, column: string, ddl: string) {
+  try {
+    database.exec(`ALTER TABLE query_events ADD COLUMN ${column} ${ddl}`);
+  } catch (e) {
+    if (!(e instanceof Error) || !/duplicate column/i.test(e.message)) throw e;
+  }
+}
+
 function getDb(): DatabaseSync {
   if (db) return db;
   mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -38,6 +51,11 @@ function getDb(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_query_events_completed_at ON query_events(completed_at);
     CREATE INDEX IF NOT EXISTS idx_query_events_status ON query_events(status);
   `);
+  // used_pre_aggregation: NULL = unknown (e.g. an error row that never got
+  // far enough to resolve pre-aggregations), 0/1 once known.
+  addColumnIfMissing(db, "used_pre_aggregation", "INTEGER");
+  addColumnIfMissing(db, "served_stale_cache", "INTEGER NOT NULL DEFAULT 0");
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_query_events_request_id ON query_events(request_id)`);
   return db;
 }
 
@@ -50,6 +68,8 @@ export interface IngestEvent {
   userId?: string;
   query?: unknown;
   error?: string;
+  usedPreAggregation?: boolean;
+  servedStaleCache?: boolean;
 }
 
 // 'Load Request Success' -> success. 'Continue wait' -> pending (Cube
@@ -68,16 +88,80 @@ function pruneOld(database: DatabaseSync) {
   database.prepare("DELETE FROM query_events WHERE completed_at < ?").run(cutoff);
 }
 
+// 'Slow Query Warning' fires separately from (usually just after) the
+// completion event for the same requestId -- see cube.js. It only ever
+// flags an existing row, never creates one: if the completion event
+// hasn't landed yet (or never does), there's nothing to flag and this
+// is a no-op rather than an incomplete/orphaned row.
+function flagStaleCache(database: DatabaseSync, requestId: string | undefined): void {
+  if (!requestId) return;
+  database
+    .prepare("UPDATE query_events SET served_stale_cache = 1 WHERE request_id = ?")
+    .run(requestId);
+}
+
+// Bridges 'Load Request SQL' (carries the real pre-aggregation signal --
+// see cube.js's long comment on why 'Load Request Success's own
+// queriesWithPreAggregations field turned out to be unreliable) with the
+// completion event for the same requestId, which creates the row and
+// arrives moments later. Purely in-memory: this only ever bridges two
+// near-simultaneous events for the same in-flight request, nothing here
+// needs to survive a restart. A request can generate more than one 'Load
+// Request SQL' (compareDateRange-style multi-query requests), hence
+// OR-combining rather than overwriting.
+const pendingPreAgg = new Map<string, { usedPreAggregation: boolean; recordedAt: number }>();
+const PENDING_TTL_MS = 60_000;
+
+function notePreAggregationUsage(requestId: string | undefined, used: boolean): void {
+  if (!requestId) return;
+  const existing = pendingPreAgg.get(requestId);
+  pendingPreAgg.set(requestId, {
+    usedPreAggregation: (existing?.usedPreAggregation ?? false) || used,
+    recordedAt: Date.now(),
+  });
+}
+
+// Consumes (removes) any buffered signal for this requestId. Also sweeps
+// stale entries -- e.g. a 'Load Request SQL' whose completion event never
+// arrived (process crash, dropped POST) -- so this can't grow unbounded.
+function takePreAggregationUsage(requestId: string | undefined): boolean | undefined {
+  const cutoff = Date.now() - PENDING_TTL_MS;
+  for (const [key, entry] of pendingPreAgg) {
+    if (entry.recordedAt < cutoff) pendingPreAgg.delete(key);
+  }
+  if (!requestId) return undefined;
+  const entry = pendingPreAgg.get(requestId);
+  if (!entry) return undefined;
+  pendingPreAgg.delete(requestId);
+  return entry.usedPreAggregation;
+}
+
 export function insertEvent(ev: IngestEvent): void {
   const database = getDb();
+
+  if (ev.type === "Load Request SQL") {
+    notePreAggregationUsage(ev.requestId, Boolean(ev.usedPreAggregation));
+    return;
+  }
+
+  if (ev.type === "Slow Query Warning") {
+    flagStaleCache(database, ev.requestId);
+    return;
+  }
+
   const durationMs = Math.max(0, Math.round(ev.durationMs ?? 0));
   const completedAt = new Date();
   const startedAt = new Date(completedAt.getTime() - durationMs);
+  // Prefer the buffered 'Load Request SQL' signal (reliable, see above)
+  // over ev.usedPreAggregation (cube.js only sets that on non-SQL events
+  // as a fallback, currently never -- kept as a fallback for forward
+  // compatibility rather than removed).
+  const usedPreAggregation = takePreAggregationUsage(ev.requestId) ?? ev.usedPreAggregation;
   database
     .prepare(
       `INSERT INTO query_events
-        (request_id, type, status, duration_ms, started_at, completed_at, api_type, organisation_id, user_id, query_json, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (request_id, type, status, duration_ms, started_at, completed_at, api_type, organisation_id, user_id, query_json, error_message, used_pre_aggregation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       ev.requestId ?? null,
@@ -90,7 +174,8 @@ export function insertEvent(ev: IngestEvent): void {
       ev.organisationId ?? null,
       ev.userId ?? null,
       ev.query !== undefined ? JSON.stringify(ev.query) : null,
-      ev.error ?? null
+      ev.error ?? null,
+      usedPreAggregation === undefined ? null : usedPreAggregation ? 1 : 0
     );
   pruneOld(database);
 }
@@ -108,13 +193,19 @@ export interface QueryEventRow {
   userId: string | null;
   queryJson: string | null;
   errorMessage: string | null;
+  // null = unknown (row never resolved far enough to tell, e.g. most
+  // error types), 0/1 once known. servedStaleCache is always 0/1 (defaults
+  // false; only ever set true by a matching 'Slow Query Warning').
+  usedPreAggregation: number | null;
+  servedStaleCache: number;
 }
 
 const SELECT_COLUMNS = `
   id, request_id as requestId, type, status, duration_ms as durationMs,
   started_at as startedAt, completed_at as completedAt, api_type as apiType,
   organisation_id as organisationId, user_id as userId,
-  query_json as queryJson, error_message as errorMessage
+  query_json as queryJson, error_message as errorMessage,
+  used_pre_aggregation as usedPreAggregation, served_stale_cache as servedStaleCache
 `;
 
 export interface ListParams {

@@ -55,6 +55,10 @@ export const INDEX_HTML = `<!doctype html>
   .pill.status-success { background: #163a2e; color: #86efac; }
   .pill.status-error { background: #3a1e2e; color: #f9a8d4; }
   .pill.status-pending { background: #3a3313; color: #fde68a; }
+  .pill.source-preagg { background: #1e2a3a; color: #93c5fd; }
+  .pill.source-scan { background: #3a2313; color: #fdba74; }
+  .pill.source-unknown { background: #1a1d22; color: #6b7280; }
+  .pill.cache-stale { background: #3a3313; color: #fde68a; margin-left: 4px; }
   .json-key { color: #93c5fd; }
   .json-string { color: #86efac; }
   .json-number { color: #fdba74; }
@@ -638,6 +642,11 @@ function svgEl(tag, attrs) {
   return node;
 }
 
+// Fixed-width, centered bars rather than stretching to fill the card --
+// with only 1-2 buckets (a fresh deployment, or a quiet period) stretched
+// bars rendered as one giant solid block indistinguishable from a plain
+// rectangle. Baseline + per-bar value label + hour labels make it read as
+// an actual chart even with very little data, not just at high volume.
 function renderBarChart(host, buckets, valueFn, color, formatValue, titleText) {
   const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
   if (!buckets.length) {
@@ -645,22 +654,52 @@ function renderBarChart(host, buckets, valueFn, color, formatValue, titleText) {
     host.append(card);
     return;
   }
-  const width = 600, height = 140, padding = 4;
+  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
+  const plotHeight = height - padTop - padBottom;
   const values = buckets.map(valueFn);
   const max = Math.max.apply(null, values.concat([1]));
-  const barWidth = (width - padding * 2) / buckets.length;
-  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'none' });
+  const slot = (width - padSide * 2) / buckets.length;
+  const barWidth = Math.min(slot * 0.6, 48);
+  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
+
+  svg.append(svgEl('line', {
+    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
+    stroke: '#23262b', 'stroke-width': 1,
+  }));
+
+  const showValueLabels = buckets.length <= 24;
+  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
+
   buckets.forEach((b, i) => {
     const v = values[i];
-    const barHeight = Math.max((v / max) * (height - 20), 1);
-    const x = padding + i * barWidth;
-    const y = height - barHeight - 14;
-    const rect = svgEl('rect', { x: x + 1, y: y, width: Math.max(barWidth - 2, 1), height: barHeight, fill: color, rx: 2 });
+    const barHeight = v > 0 ? Math.max((v / max) * plotHeight, 2) : 0;
+    const slotX = padSide + i * slot;
+    const x = slotX + (slot - barWidth) / 2;
+    const y = height - padBottom - barHeight;
+
+    const rect = svgEl('rect', { x: x, y: y, width: barWidth, height: barHeight, fill: color, rx: 2 });
     const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
     titleNode.textContent = b.bucket + ': ' + formatValue(v);
     rect.append(titleNode);
     svg.append(rect);
+
+    if (showValueLabels && v > 0) {
+      const label = svgEl('text', {
+        x: slotX + slot / 2, y: y - 4, 'text-anchor': 'middle', 'font-size': '9', fill: '#9aa4b2',
+      });
+      label.textContent = formatValue(v);
+      svg.append(label);
+    }
+
+    if (i % labelStride === 0) {
+      const hourLabel = svgEl('text', {
+        x: slotX + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
+      });
+      hourLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit' });
+      svg.append(hourLabel);
+    }
   });
+
   card.append(svg);
   host.append(card);
 }
@@ -709,6 +748,27 @@ function renderQueryFilterBar() {
   host.append(el('div', { class: 'filter-bar' }, [select, input]));
 }
 
+// usedPreAggregation: 1 = resolved from a rollup already in Cube Store
+// (fast path), 0 = hit the source database directly, null = unknown (the
+// query never got far enough to tell -- most error types). servedStaleCache
+// is a separate, orthogonal signal: Cube served an already-cached result
+// because the freshness recheck was too slow to wait on -- can happen
+// either way, so it's a second badge, not an alternative to the first.
+function sourcePill(row) {
+  const pills = [];
+  if (row.usedPreAggregation === 1) {
+    pills.push(el('span', { class: 'pill source-preagg' }, ['pre-aggregation']));
+  } else if (row.usedPreAggregation === 0) {
+    pills.push(el('span', { class: 'pill source-scan' }, ['source scan']));
+  } else {
+    pills.push(el('span', { class: 'pill source-unknown' }, ['unknown']));
+  }
+  if (row.servedStaleCache) {
+    pills.push(el('span', { class: 'pill cache-stale' }, ['stale cache']));
+  }
+  return pills;
+}
+
 function openQueryOverlay(row) {
   document.getElementById('overlay-title').textContent = row.requestId || ('Query #' + row.id);
   const body = document.getElementById('overlay-body');
@@ -730,6 +790,7 @@ function openQueryOverlay(row) {
     if (!value) continue;
     dl.append(el('dt', null, [label]), el('dd', null, [String(value)]));
   }
+  dl.append(el('dt', null, ['Source']), el('dd', null, sourcePill(row)));
   body.append(dl);
 
   if (row.errorMessage) {
@@ -756,6 +817,7 @@ function renderQueryTable(rows) {
     el('th', null, ['Status']),
     el('th', null, ['Started at']),
     el('th', null, ['Duration']),
+    el('th', null, ['Source']),
     el('th', null, ['API type']),
     el('th', null, ['Query preview']),
   ]);
@@ -766,6 +828,7 @@ function renderQueryTable(rows) {
       el('td', null, [el('span', { class: 'pill status-' + row.status }, [row.status])]),
       el('td', null, [fmtDate(row.startedAt)]),
       el('td', null, [fmtMs(row.durationMs)]),
+      el('td', null, sourcePill(row)),
       el('td', null, [row.apiType || '']),
       el('td', null, [preview]),
     ]);
