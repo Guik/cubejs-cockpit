@@ -1,8 +1,8 @@
 {
   "name": "cube-dashboard",
   "private": true,
-  "version": "0.0.1",
-  "description": "Self-hosted Cube ops dashboard: current data model + pre-aggregation status",
+  "version": "0.1.0",
+  "description": "Self-hosted ops dashboard for a Cube.js deployment: data model, pre-aggregation status, query history, and performance.",
   "license": "UNLICENSED",
   "type": "module",
   "devDependencies": {
