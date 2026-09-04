@@ -37,6 +37,19 @@ export const INDEX_HTML = `<!doctype html>
   .err { color: #f87171; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
   .loading { color: #6b7280; font-size: 13px; }
 
+  /* Filter bar */
+  .filter-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+  .filter-bar select, .filter-bar input { background: #111318; border: 1px solid #23262b; color: #e6e6e6; padding: 6px 10px; border-radius: 6px; font-size: 13px; font-family: inherit; }
+  .filter-bar input { flex: 1; max-width: 320px; }
+  .filter-bar select:focus, .filter-bar input:focus { outline: 1px solid #3b4252; }
+
+  /* Build history tab */
+  .info-card { border: 1px solid #23262b; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
+  .info-card code { color: #cbd5e1; background: #1a1d22; padding: 1px 5px; border-radius: 4px; }
+  .gen-list { list-style: none; margin: 0; padding: 0; }
+  .gen-list li { padding: 5px 0; border-bottom: 1px solid #1c1f24; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; display: flex; justify-content: space-between; gap: 12px; }
+  .gen-list li:last-child { border-bottom: none; }
+
   /* Sortable partitions table */
   #preagg-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
   #preagg-table th[data-sort]:hover { color: #cbd5e1; }
@@ -69,6 +82,7 @@ export const INDEX_HTML = `<!doctype html>
   <nav>
     <button data-tab="model" class="active">Data model</button>
     <button data-tab="preaggs">Pre-aggregations</button>
+    <button data-tab="history">Build history</button>
   </nav>
 </header>
 <main>
@@ -80,7 +94,14 @@ export const INDEX_HTML = `<!doctype html>
   </section>
   <section id="preaggs">
     <h2>Pre-aggregations &amp; partitions</h2>
+    <div id="preagg-filter-host"></div>
     <div id="preagg-table-host" class="loading">Loading&hellip;</div>
+  </section>
+  <section id="history">
+    <h2>Build history</h2>
+    <div id="history-info-host"></div>
+    <div id="history-filter-host"></div>
+    <div id="history-list-host" class="loading">Loading&hellip;</div>
   </section>
 </main>
 
@@ -259,6 +280,33 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeOverlay();
 });
 
+// A select (by pre-aggregation id) + free-text search (by table name),
+// shared shape used on both the partitions table and the build history
+// list. 'ids' populates the select's options; 'onChange' re-renders
+// whatever's filtered whenever either control changes.
+function renderFilterBar(hostId, ids, state, onChange) {
+  const host = document.getElementById(hostId);
+  host.innerHTML = '';
+  const select = el('select', null, [
+    el('option', { value: '' }, ['All pre-aggregations']),
+    ...ids.map(id => el('option', { value: id }, [id])),
+  ]);
+  select.value = state.preAggId;
+  select.addEventListener('change', () => { state.preAggId = select.value; onChange(); });
+
+  const input = el('input', { type: 'search', placeholder: 'Search table name\\u2026' });
+  input.value = state.search;
+  input.addEventListener('input', () => { state.search = input.value.trim().toLowerCase(); onChange(); });
+
+  host.append(el('div', { class: 'filter-bar' }, [select, input]));
+}
+
+function matchesFilter(preAggId, tableName, state) {
+  if (state.preAggId && preAggId !== state.preAggId) return false;
+  if (state.search && !(tableName || '').toLowerCase().includes(state.search)) return false;
+  return true;
+}
+
 const COLUMNS = [
   { key: 'preAggId', label: 'Pre-aggregation', sort: (r) => r.preAggId },
   { key: 'tableName', label: 'Table name', sort: (r) => r.partition.tableName || '' },
@@ -268,13 +316,17 @@ const COLUMNS = [
 ];
 
 let sortState = { key: 'lastUpdated', dir: 'desc' };
+let preaggFilterState = { preAggId: '', search: '' };
+let preaggAllRows = [];
 
-function renderPreaggTable(rows) {
+function renderPreaggTable() {
   const host = document.getElementById('preagg-table-host');
   host.innerHTML = '';
 
+  const rows = preaggAllRows.filter(r => matchesFilter(r.preAggId, r.partition.tableName, preaggFilterState));
+
   if (!rows.length) {
-    host.append(el('div', { class: 'muted' }, ['No partitions found.']));
+    host.append(el('div', { class: 'muted' }, [preaggAllRows.length ? 'No partitions match this filter.' : 'No partitions found.']));
     return;
   }
 
@@ -294,7 +346,7 @@ function renderPreaggTable(rows) {
       } else {
         sortState = { key: col.key, dir: col.key === 'lastUpdated' ? 'desc' : 'asc' };
       }
-      renderPreaggTable(rows);
+      renderPreaggTable();
     });
     return th;
   }));
@@ -330,10 +382,130 @@ async function loadPreAggregations() {
         rows.push({ preAggId, partition });
       }
     }
-    renderPreaggTable(rows);
+    preaggAllRows = rows;
+    const ids = [...new Set(rows.map(r => r.preAggId))].sort();
+    renderFilterBar('preagg-filter-host', ids, preaggFilterState, renderPreaggTable);
+    renderPreaggTable();
   } catch (e) {
     host.innerHTML = '';
     host.append(errBox(e));
+  }
+}
+
+// --- Build history tab ---
+//
+// Only Cube Store's own system.tables retains old table generations (past
+// rebuilds) for a partition, and only while it's still inside its
+// refreshKey.updateWindow -- see shared/cubeStore.ts for the full
+// reasoning. The refreshKey values themselves come straight off the
+// compiled pre-aggregation config cube_api returns (not parsed out of the
+// schema source), so they can't drift from what's actually configured.
+
+function openGenerationsOverlay(preAggId, group) {
+  const backdrop = document.getElementById('overlay-backdrop');
+  document.getElementById('overlay-title').textContent = group.logicalName;
+
+  const body = document.getElementById('overlay-body');
+  body.innerHTML = '';
+
+  const dl = el('dl', { class: 'field-grid' });
+  dl.append(el('dt', null, ['Pre-aggregation']), el('dd', null, [preAggId]));
+  dl.append(el('dt', null, ['Generations']), el('dd', null, [String(group.generations.length)]));
+  body.append(dl);
+
+  body.append(el('div', { class: 'muted' }, ['Table generations (newest first) -- each one is a separate physical table Cube Store built; older generations of the same partition disappear once it ages out of updateWindow:']));
+  body.append(el('ul', { class: 'gen-list' }, group.generations.map(g => el('li', null, [
+    el('span', null, [g.tableName]),
+    el('span', { class: 'muted' }, [fmtDate(g.createdAt)]),
+  ]))));
+
+  backdrop.hidden = false;
+}
+
+let historyFilterState = { preAggId: '', search: '' };
+let historyAllGroups = []; // [{ preAggId, group }]
+
+function renderHistoryList() {
+  const host = document.getElementById('history-list-host');
+  host.innerHTML = '';
+
+  const rows = historyAllGroups.filter(r => matchesFilter(r.preAggId, r.group.logicalName, historyFilterState));
+
+  if (!rows.length) {
+    host.append(el('div', { class: 'muted' }, [historyAllGroups.length ? 'No partitions match this filter.' : 'No history found.']));
+    return;
+  }
+
+  const sorted = rows.slice().sort((a, b) => {
+    const at = a.group.generations[0] ? a.group.generations[0].createdAt : '';
+    const bt = b.group.generations[0] ? b.group.generations[0].createdAt : '';
+    return bt < at ? -1 : bt > at ? 1 : 0; // most recent build first
+  });
+
+  const thead = el('tr', null, [
+    el('th', null, ['Pre-aggregation']),
+    el('th', null, ['Partition']),
+    el('th', null, ['Generations']),
+    el('th', null, ['Most recent build']),
+  ]);
+
+  const tbody = sorted.map(row => {
+    const latest = row.group.generations[0];
+    const tr = el('tr', null, [
+      el('td', null, [row.preAggId]),
+      el('td', { class: 'mono' }, [shortTableName(row.group.logicalName)]),
+      el('td', null, [
+        String(row.group.generations.length),
+        row.group.generations.length > 1 ? el('span', { class: 'pill built' }, ['rebuilt']) : '',
+      ]),
+      el('td', null, [latest ? fmtDate(latest.createdAt) : '\\u2014']),
+    ]);
+    tr.addEventListener('click', () => openGenerationsOverlay(row.preAggId, row.group));
+    return tr;
+  });
+
+  host.append(el('table', null, [thead, ...tbody]));
+}
+
+async function loadBuildHistory() {
+  const infoHost = document.getElementById('history-info-host');
+  const listHost = document.getElementById('history-list-host');
+  try {
+    const data = await getJSON('/api/pre-aggregations/build-history');
+    const preAggs = data.preAggregations || [];
+
+    infoHost.innerHTML = '';
+    for (const pa of preAggs) {
+      const rk = pa.refreshKey || {};
+      infoHost.append(el('div', { class: 'info-card' }, [
+        el('strong', null, [pa.id]), ' \\u2014 refreshes every ',
+        el('code', null, [rk.every || '?']),
+        ', rebuilds partitions within the last ',
+        el('code', null, [rk.updateWindow || '?']),
+        ' (updateWindow). ',
+        el('br', null, []),
+        el('span', { class: 'muted' }, [
+          'To change updateWindow: edit refreshKey.updateWindow for this pre-aggregation in schema/*.js and redeploy. ',
+          'It only affects which recent partitions keep getting incrementally rebuilt (and how long their build history stays visible here) \\u2014 ',
+          'it does not rebuild anything retroactively, does not extend history for already-settled older partitions, and widening it means more freshness checks against the source DB.',
+        ]),
+      ]));
+    }
+
+    const rows = [];
+    for (const pa of preAggs) {
+      for (const group of (pa.partitions || [])) {
+        rows.push({ preAggId: pa.id, group });
+      }
+    }
+    historyAllGroups = rows;
+    const ids = [...new Set(rows.map(r => r.preAggId))].sort();
+    renderFilterBar('history-filter-host', ids, historyFilterState, renderHistoryList);
+    renderHistoryList();
+  } catch (e) {
+    infoHost.innerHTML = '';
+    listHost.innerHTML = '';
+    listHost.append(errBox(e));
   }
 }
 
@@ -351,6 +523,7 @@ document.querySelectorAll('nav button').forEach(btn => {
 loadModelMeta();
 loadModelFiles();
 loadPreAggregations();
+loadBuildHistory();
 </script>
 </body>
 </html>
