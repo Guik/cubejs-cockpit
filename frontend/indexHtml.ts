@@ -63,6 +63,8 @@ export const INDEX_HTML = `<!doctype html>
   .pill.source-scan { background: #3a2313; color: #fdba74; }
   .pill.source-unknown { background: #1a1d22; color: #6b7280; }
   .pill.cache-stale { background: #3a3313; color: #fde68a; margin-left: 4px; }
+  .pill.kind-auth { background: #3a1e2e; color: #f9a8d4; }
+  .pill.kind-preagg-build { background: #3a2313; color: #fdba74; }
   .json-key { color: #93c5fd; }
   .json-string { color: #86efac; }
   .json-number { color: #fdba74; }
@@ -180,8 +182,12 @@ export const INDEX_HTML = `<!doctype html>
     <div id="perf-timerange-host"></div>
     <h2>Cache &amp; pre-aggregation performance</h2>
     <div id="perf-charts-host" class="loading">Loading&hellip;</div>
+    <h2>Request mix &amp; cache freshness</h2>
+    <div id="perf-mix-charts-host" class="loading">Loading&hellip;</div>
     <h2>Data model compilation</h2>
     <div id="perf-compile-charts-host" class="loading">Loading&hellip;</div>
+    <h2>Errors</h2>
+    <div id="perf-errors-host" class="loading">Loading&hellip;</div>
   </section>
 </main>
 
@@ -1081,6 +1087,96 @@ async function loadPerformanceCharts() {
   }
 }
 
+// Unlike CACHE_TYPE_ORDER (a fixed, known-in-advance set of tiers), API
+// types aren't enumerated anywhere in this project -- derived from
+// whatever the data actually contains, sorted for a stable legend order.
+// Known values get a fixed color; anything unrecognized still renders
+// (grey) rather than silently vanishing from the chart.
+const API_TYPE_COLORS = { rest: '#93c5fd', sql: '#86efac', graphql: '#c4b5fd', ws: '#fdba74' };
+const API_TYPE_FALLBACK_COLOR = '#9aa4b2';
+
+function pivotApiTypeBuckets(rows) {
+  const byBucket = new Map();
+  for (const r of rows) {
+    if (!byBucket.has(r.bucket)) byBucket.set(r.bucket, { bucket: r.bucket });
+    byBucket.get(r.bucket)[r.apiType] = { count: r.count };
+  }
+  return [...byBucket.values()].sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
+}
+
+async function loadPerformanceMixCharts() {
+  const host = document.getElementById('perf-mix-charts-host');
+  try {
+    const [apiTypeData, staleData] = await Promise.all([
+      getJSON('/api/query-history/api-type-stats?sinceMinutes=' + queryTimeRangeMinutes),
+      getJSON('/api/query-history/stale-cache-stats?sinceMinutes=' + queryTimeRangeMinutes),
+    ]);
+
+    const apiTypeBuckets = pivotApiTypeBuckets(apiTypeData.buckets || []);
+    const apiTypeKeys = [...new Set((apiTypeData.buckets || []).map(r => r.apiType))].sort();
+    const apiTypeColors = {}, apiTypeLabels = {};
+    for (const k of apiTypeKeys) { apiTypeColors[k] = API_TYPE_COLORS[k] || API_TYPE_FALLBACK_COLOR; apiTypeLabels[k] = k; }
+
+    const staleBuckets = staleData.buckets || [];
+
+    host.innerHTML = '';
+    const row = el('div', { class: 'charts-row' });
+    host.append(row);
+    renderStackedBarChart(row, apiTypeBuckets, apiTypeKeys, apiTypeColors, apiTypeLabels, 'Requests by API type (last ' + currentRangeLabel() + ')');
+    renderLineChart(
+      row, staleBuckets,
+      b => (b.total > 0 ? (b.staleCount / b.total) * 100 : 0),
+      '#fde68a',
+      v => v.toFixed(1) + '%',
+      'Stale-cache-served rate (last ' + currentRangeLabel() + ')'
+    );
+  } catch (e) {
+    host.innerHTML = '';
+    host.append(errBox(e));
+  }
+}
+
+// --- Errors: auth failures + pre-aggregation build job errors ---
+//
+// Structurally distinct from the query_events-backed charts above: neither
+// event is tied to a completed, duration-bearing request (an auth failure
+// happens before a security context exists at all; a build job error comes
+// from a background refresh-worker job, not a live HTTP request) -- so
+// this is a plain recent-errors feed, not a bucketed chart. See cube.js
+// for why auth failures can't be matched by a fixed message string, and
+// why the raw bearer token is never forwarded here.
+
+function errorKindPill(kind) {
+  const label = kind === 'auth' ? 'auth' : 'pre-agg build';
+  return el('span', { class: 'pill kind-' + kind }, [label]);
+}
+
+async function loadErrorsList() {
+  const host = document.getElementById('perf-errors-host');
+  try {
+    const data = await getJSON('/api/performance/errors?sinceMinutes=' + queryTimeRangeMinutes + '&limit=100');
+    const rows = data.rows || [];
+    host.innerHTML = '';
+    if (!rows.length) {
+      host.append(el('div', { class: 'muted' }, ['No auth failures or pre-aggregation build errors in this window.']));
+      return;
+    }
+    const table = el('table', null, [
+      el('tr', null, [el('th', null, ['Time']), el('th', null, ['Kind']), el('th', null, ['Event']), el('th', null, ['Details'])]),
+      ...rows.map(r => el('tr', null, [
+        el('td', null, [fmtDate(r.occurredAt)]),
+        el('td', null, [errorKindPill(r.kind)]),
+        el('td', null, [el('code', null, [r.type || ''])]),
+        el('td', null, [r.errorMessage || (r.context ? r.context : '')]),
+      ])),
+    ]);
+    host.append(table);
+  } catch (e) {
+    host.innerHTML = '';
+    host.append(errBox(e));
+  }
+}
+
 // --- Query table, filter, overlay ---
 
 let queryFilterState = { status: '', search: '' };
@@ -1343,10 +1439,14 @@ TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
 onTimeRangeChange(loadQueryCharts);
 onTimeRangeChange(loadQueryTable);
 onTimeRangeChange(loadPerformanceCharts);
+onTimeRangeChange(loadPerformanceMixCharts);
+onTimeRangeChange(loadErrorsList);
 loadQueryCharts();
 renderQueryFilterBar();
 loadQueryTable();
 loadPerformanceCharts();
+loadPerformanceMixCharts();
+loadErrorsList();
 </script>
 </body>
 </html>

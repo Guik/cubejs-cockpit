@@ -1,5 +1,12 @@
 import { api } from "encore.dev/api";
-import { insertCompileEvent, compileStatsBuckets, CompileIngestEvent } from "./db";
+import {
+  insertCompileEvent,
+  compileStatsBuckets,
+  CompileIngestEvent,
+  insertErrorEvent,
+  listErrorEvents,
+  ErrorIngestEvent,
+} from "./db";
 
 // api.raw, matching queryhistory/api.ts's established pattern in this
 // project (see its header comment for why).
@@ -37,5 +44,31 @@ export const compileStats = api.raw(
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
     sendJson(resp, 200, { buckets: compileStatsBuckets(sinceMinutes) });
+  }
+);
+
+// Same trust boundary as compileIngest above. Never carries a raw token --
+// cube.js strips it before forwarding, see its long comment on why.
+export const errorIngest = api.raw(
+  { expose: true, method: "POST", path: "/api/performance/error-ingest" },
+  async (req, resp) => {
+    try {
+      const body = JSON.parse(await readBody(req)) as ErrorIngestEvent;
+      if (body.kind !== "auth" && body.kind !== "preagg-build") throw new Error("missing or invalid 'kind'");
+      insertErrorEvent(body);
+      sendJson(resp, 200, { ok: true });
+    } catch (e) {
+      sendJson(resp, 400, { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+);
+
+export const errors = api.raw(
+  { expose: true, method: "GET", path: "/api/performance/errors" },
+  async (req, resp) => {
+    const url = new URL(req.url || "", "http://internal");
+    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
+    const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 100;
+    sendJson(resp, 200, { rows: listErrorEvents(sinceMinutes, limit) });
   }
 );

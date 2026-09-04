@@ -420,3 +420,60 @@ export function cacheStatsBuckets(sinceMinutes: number): CacheStatsBucket[] {
     )
     .all(bucketSeconds, bucketSeconds, since) as unknown as CacheStatsBucket[];
 }
+
+export interface ApiTypeStatsBucket {
+  bucket: string;
+  apiType: string;
+  count: number;
+}
+
+// Same one-row-per-(bucket, series) shape as cacheStatsBuckets, grouped by
+// api_type (rest/sql/graphql/... -- whatever this Cube instance actually
+// serves) instead. Excludes NULL api_type the same way and for the same
+// reason as cache_type above.
+export function apiTypeStatsBuckets(sinceMinutes: number): ApiTypeStatsBucket[] {
+  const database = getDb();
+  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  return database
+    .prepare(
+      `SELECT
+         datetime((CAST(strftime('%s', completed_at) AS INTEGER) / CAST(? AS INTEGER)) * CAST(? AS INTEGER), 'unixepoch') as bucket,
+         api_type as apiType,
+         COUNT(*) as count
+       FROM query_events
+       WHERE completed_at >= ? AND api_type IS NOT NULL
+       GROUP BY bucket, apiType
+       ORDER BY bucket ASC`
+    )
+    .all(bucketSeconds, bucketSeconds, since) as unknown as ApiTypeStatsBucket[];
+}
+
+export interface StaleCacheStatsBucket {
+  bucket: string;
+  total: number;
+  staleCount: number;
+}
+
+// served_stale_cache is only ever set true by a matching 'Slow Query
+// Warning' (see flagStaleCache above) -- counted against every row in the
+// window (not just successes) so the rate reflects "how often did Cube
+// serve stale data" against the full traffic it saw, not a cherry-picked
+// denominator.
+export function staleCacheStatsBuckets(sinceMinutes: number): StaleCacheStatsBucket[] {
+  const database = getDb();
+  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  return database
+    .prepare(
+      `SELECT
+         datetime((CAST(strftime('%s', completed_at) AS INTEGER) / CAST(? AS INTEGER)) * CAST(? AS INTEGER), 'unixepoch') as bucket,
+         COUNT(*) as total,
+         SUM(served_stale_cache) as staleCount
+       FROM query_events
+       WHERE completed_at >= ?
+       GROUP BY bucket
+       ORDER BY bucket ASC`
+    )
+    .all(bucketSeconds, bucketSeconds, since) as unknown as StaleCacheStatsBucket[];
+}

@@ -1,5 +1,14 @@
 import { api } from "encore.dev/api";
-import { insertEvent, listEvents, getEventById, statsBuckets, cacheStatsBuckets, IngestEvent } from "./db";
+import {
+  insertEvent,
+  listEvents,
+  getEventById,
+  statsBuckets,
+  cacheStatsBuckets,
+  apiTypeStatsBuckets,
+  staleCacheStatsBuckets,
+  IngestEvent,
+} from "./db";
 
 // api.raw throughout, matching preaggregations/api.ts's established
 // pattern in this project: query-string/body parsing done by hand rather
@@ -67,6 +76,24 @@ export const cacheStats = api.raw(
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
     sendJson(resp, 200, { buckets: cacheStatsBuckets(sinceMinutes) });
+  }
+);
+
+export const apiTypeStats = api.raw(
+  { expose: true, method: "GET", path: "/api/query-history/api-type-stats" },
+  async (req, resp) => {
+    const url = new URL(req.url || "", "http://internal");
+    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
+    sendJson(resp, 200, { buckets: apiTypeStatsBuckets(sinceMinutes) });
+  }
+);
+
+export const staleCacheStats = api.raw(
+  { expose: true, method: "GET", path: "/api/query-history/stale-cache-stats" },
+  async (req, resp) => {
+    const url = new URL(req.url || "", "http://internal");
+    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
+    sendJson(resp, 200, { buckets: staleCacheStatsBuckets(sinceMinutes) });
   }
 );
 

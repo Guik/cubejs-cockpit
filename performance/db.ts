@@ -27,6 +27,23 @@ function getDb(): DatabaseSync {
       error_message TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_compile_events_completed_at ON compile_events(completed_at);
+
+    -- 'auth' (a failed/rejected auth attempt -- see cube.js: detected
+    -- structurally, not by message text, since Cube's auth failures use
+    -- the thrown error's own message as the event type) or 'preagg-build'
+    -- ('Pre-aggregations build job error' from query-orchestrator's
+    -- PreAggregationLoader.js -- a background refresh-worker job, not a
+    -- live request, so no duration to record here).
+    CREATE TABLE IF NOT EXISTS error_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      type TEXT,
+      request_id TEXT,
+      context TEXT,
+      error_message TEXT,
+      occurred_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_error_events_occurred_at ON error_events(occurred_at);
   `);
   return db;
 }
@@ -41,6 +58,11 @@ export interface CompileIngestEvent {
 function pruneOld(database: DatabaseSync) {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000).toISOString();
   database.prepare("DELETE FROM compile_events WHERE completed_at < ?").run(cutoff);
+}
+
+function pruneOldErrors(database: DatabaseSync) {
+  const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 3600 * 1000).toISOString();
+  database.prepare("DELETE FROM error_events WHERE occurred_at < ?").run(cutoff);
 }
 
 export function insertCompileEvent(ev: CompileIngestEvent): void {
@@ -97,4 +119,56 @@ export function compileStatsBuckets(sinceMinutes: number): CompileStatsBucket[] 
        ORDER BY bucket ASC`
     )
     .all(bucketSeconds, bucketSeconds, since) as unknown as CompileStatsBucket[];
+}
+
+export interface ErrorIngestEvent {
+  kind: "auth" | "preagg-build";
+  type?: string;
+  requestId?: string;
+  context?: string;
+  error?: string;
+}
+
+export function insertErrorEvent(ev: ErrorIngestEvent): void {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT INTO error_events (kind, type, request_id, context, error_message, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      ev.kind,
+      ev.type ?? null,
+      ev.requestId ?? null,
+      ev.context ?? null,
+      ev.error ?? null,
+      new Date().toISOString()
+    );
+  pruneOldErrors(database);
+}
+
+export interface ErrorEventRow {
+  id: number;
+  kind: string;
+  type: string | null;
+  requestId: string | null;
+  context: string | null;
+  errorMessage: string | null;
+  occurredAt: string;
+}
+
+export function listErrorEvents(sinceMinutes: number, limit = 100): ErrorEventRow[] {
+  const database = getDb();
+  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  return database
+    .prepare(
+      `SELECT
+         id, kind, type, request_id as requestId, context,
+         error_message as errorMessage, occurred_at as occurredAt
+       FROM error_events
+       WHERE occurred_at >= ?
+       ORDER BY occurred_at DESC
+       LIMIT ?`
+    )
+    .all(since, Math.min(Math.max(limit, 1), 500)) as unknown as ErrorEventRow[];
 }
