@@ -126,5 +126,14 @@ Wraps `encore build docker`, cross-compiling for `linux/amd64` regardless
 of the build machine's architecture. Load the resulting image on the
 target host (`docker save | ssh host docker load`, or push to a registry)
 and bring it up via whatever docker-compose stack orchestrates it alongside
-`cube_api` and Cube Store -- that compose file, and the `.env` it reads
-secrets from, belong to the Cube deployment repo, not here.
+`cube_api` and Cube Store -- see `docker-compose.example.yml` for the
+shape of that (the real compose file, and the `.env` it reads secrets
+from, belong to the Cube deployment repo, not here).
+
+There is no hand-written `Dockerfile`: Encore's own compiler is the build
+system for a TypeScript Encore app -- `encore build docker` compiles the
+app, embeds Encore's native runtime binding, and produces the image
+directly, in one step it doesn't expose a way to split into "compile" and
+"package" stages. A conventional multi-stage Dockerfile can't reproduce
+that without reimplementing Encore's own compiler, so `scripts/build.sh`
+(wrapping the CLI) is the actual build step, not a placeholder for one.

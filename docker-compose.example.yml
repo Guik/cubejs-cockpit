@@ -1,0 +1,79 @@
+# Example stack showing how this dashboard fits alongside a Cube.js
+# deployment. Copy the `cube_dashboard` service (and the three
+# QUERY_HISTORY_*/PERFORMANCE_*_INGEST_URL env vars on your Cube services)
+# into your own deployment's docker-compose.yml -- this file is a
+# reference, not something meant to be run as-is against a real Cube
+# deployment's `cube_api`/`cubestore` services.
+#
+# Build the image first (from this repo): ./scripts/build.sh
+# Then:                                    docker compose up -d cube_dashboard
+
+services:
+  # --- Your existing Cube.js deployment (shown for context; omit these two
+  # services if you already have them -- just copy the env vars below onto
+  # your real cube_api/cube_refresh_worker services). ---
+
+  cube_api:
+    image: cubejs/cube:v1.6.73
+    ports:
+      - "4000:4000"
+    env_file: .env
+    environment:
+      - CUBEJS_CUBESTORE_HOST=cubestore
+      # A custom `logger` in cube.js forwards specific query/cache/compile/
+      # error events to this dashboard, fire-and-forget with a short
+      # timeout -- see this repo's README ("Integrating with Cube.js") for
+      # exactly which cube.js changes that requires. Internal docker
+      # network hostname; never routed through any external network.
+      - QUERY_HISTORY_INGEST_URL=http://cube_dashboard:8080/api/query-history/ingest
+      - PERFORMANCE_INGEST_URL=http://cube_dashboard:8080/api/performance/compile-ingest
+      - PERFORMANCE_ERROR_INGEST_URL=http://cube_dashboard:8080/api/performance/error-ingest
+    volumes:
+      - ./cube.js:/cube/conf/cube.js
+      - ./schema:/cube/conf/schema
+    depends_on:
+      - cubestore
+
+  # Cube Store: required for the pre-aggregation and build-history views.
+  # Speaks the MySQL wire protocol with NO auth of its own -- never publish
+  # its port on 0.0.0.0 on a public host; bind it to a private/overlay
+  # network address only, same as the dashboard's own port below.
+  cubestore:
+    image: cubejs/cubestore:v1.6.73
+    environment:
+      - CUBESTORE_REMOTE_DIR=/cube/data
+    volumes:
+      - ./.cubestore:/cube/data
+
+  # --- The dashboard itself ---
+
+  cube_dashboard:
+    image: cube-dashboard:latest
+    ports:
+      # Serves pre-aggregation data gated only by CUBEJS_PLAYGROUND_AUTH_SECRET
+      # (which bypasses your queryRewrite's row-level filtering) and the raw
+      # schema source -- treat this port with the same care as Cube Store's
+      # above. Bind to a private address, not 0.0.0.0.
+      - "127.0.0.1:8091:8080"
+    environment:
+      # Internal docker network hostnames -- service-to-service inside this
+      # compose network, not routed externally.
+      - CUBE_API_INTERNAL_URL=http://cube_api:4000
+      - CUBESTORE_HOST=cubestore
+      # Must match your Cube deployment's own secrets exactly.
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:?set this to match your Cube deployment}
+      - CUBEJS_PLAYGROUND_AUTH_SECRET=${CUBEJS_PLAYGROUND_AUTH_SECRET:?set this to match your Cube deployment}
+      # Optional; defaults shown. See the README's Configuration table for
+      # the full list (QUERY_HISTORY_DB_PATH, PERFORMANCE_DB_PATH, etc.).
+      - QUERY_HISTORY_RETENTION_DAYS=30
+    volumes:
+      # Read-only bind mount of the SAME schema directory cube_api loads
+      # from, so the "current data model" view can never drift from what's
+      # actually deployed.
+      - ./schema:/app/schema:ro
+      # SQLite files for query history + performance data. Needs to be a
+      # persistent volume -- container recreation must not lose history.
+      - ./.dashboard-data:/app/data
+    depends_on:
+      - cube_api
+      - cubestore
