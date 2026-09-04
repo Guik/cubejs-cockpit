@@ -50,6 +50,25 @@ export const INDEX_HTML = `<!doctype html>
   .tok-string { color: #a3e635; }
   .tok-keyword { color: #7dd3fc; }
   .tok-number { color: #fdba74; }
+
+  /* Query history: pastel status pills + JSON syntax coloring */
+  .pill.status-success { background: #163a2e; color: #86efac; }
+  .pill.status-error { background: #3a1e2e; color: #f9a8d4; }
+  .pill.status-pending { background: #3a3313; color: #fde68a; }
+  .json-key { color: #93c5fd; }
+  .json-string { color: #86efac; }
+  .json-number { color: #fdba74; }
+  .json-boolean, .json-null { color: #c4b5fd; }
+  .json-punct { color: #6b7280; }
+  .query-preview { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+
+  /* Hand-rolled SVG charts -- no charting library, same reasoning as the
+     hand-rolled JS/JSON highlighters below. */
+  .charts-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+  .chart-card { border: 1px solid #23262b; border-radius: 10px; padding: 14px 16px; flex: 1; min-width: 320px; }
+  .chart-card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; font-weight: 500; }
+  .chart-card svg { display: block; width: 100%; height: auto; }
+  .chart-empty { color: #6b7280; font-size: 13px; padding: 20px 0; text-align: center; }
   .muted { color: #6b7280; }
   .err { color: #f87171; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
   .loading { color: #6b7280; font-size: 13px; }
@@ -99,6 +118,7 @@ export const INDEX_HTML = `<!doctype html>
   <nav>
     <button data-tab="model" class="active">Data model</button>
     <button data-tab="preaggs">Pre-aggregations</button>
+    <button data-tab="queries">Query history</button>
   </nav>
 </header>
 <main>
@@ -124,6 +144,13 @@ export const INDEX_HTML = `<!doctype html>
       <div id="history-filter-host"></div>
       <div id="history-list-host" class="loading">Loading&hellip;</div>
     </div>
+  </section>
+  <section id="queries">
+    <h2>Query volume &amp; duration</h2>
+    <div id="query-charts-host" class="loading">Loading&hellip;</div>
+    <h2>Queries</h2>
+    <div id="query-filter-host"></div>
+    <div id="query-table-host" class="loading">Loading&hellip;</div>
   </section>
 </main>
 
@@ -565,6 +592,204 @@ async function loadBuildHistory() {
   }
 }
 
+// --- Query history tab ---
+//
+// Sourced from cube.js's custom logger (see cube.js and the plan) --
+// captures 'Load Request Success' plus every error/pending completion
+// type Cube emits, persisted server-side in dashboard/queryhistory/db.ts
+// so it survives cube_api restarts, unlike the container logs it comes from.
+
+// Same escape-first-then-tokenize approach as highlightJs, tuned for JSON
+// instead of the schema's JS: keys, string values, numbers, booleans/null
+// and punctuation each get their own pastel color. pretty=false renders a
+// single compact line (table preview); pretty=true pretty-prints (overlay).
+function highlightJson(jsonString, pretty) {
+  let text;
+  try {
+    text = JSON.stringify(JSON.parse(jsonString), null, pretty ? 2 : 0);
+  } catch (e) {
+    text = jsonString || '';
+  }
+  const escaped = escapeHtml(text);
+  const pattern = /("(?:\\\\.|[^"\\\\])*"(\\s*:)?)|(\\b(?:true|false)\\b)|(\\bnull\\b)|(-?\\d+(?:\\.\\d+)?)|([{}\\[\\],])/g;
+  return escaped.replace(pattern, (m, str, isKey, bool, nul, num, punct) => {
+    if (str) return '<span class="' + (isKey ? 'json-key' : 'json-string') + '">' + str + '</span>';
+    if (bool) return '<span class="json-boolean">' + bool + '</span>';
+    if (nul) return '<span class="json-null">' + nul + '</span>';
+    if (num) return '<span class="json-number">' + num + '</span>';
+    if (punct) return '<span class="json-punct">' + punct + '</span>';
+    return m;
+  });
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) return '';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(2) + 's';
+}
+
+// --- Hand-rolled SVG bar charts -- no charting library, same reasoning
+// as the hand-rolled syntax highlighters: keeps this one embedded file
+// with no CDN dependency.
+
+function svgEl(tag, attrs) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+}
+
+function renderBarChart(host, buckets, valueFn, color, formatValue, titleText) {
+  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
+  if (!buckets.length) {
+    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
+    host.append(card);
+    return;
+  }
+  const width = 600, height = 140, padding = 4;
+  const values = buckets.map(valueFn);
+  const max = Math.max.apply(null, values.concat([1]));
+  const barWidth = (width - padding * 2) / buckets.length;
+  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'none' });
+  buckets.forEach((b, i) => {
+    const v = values[i];
+    const barHeight = Math.max((v / max) * (height - 20), 1);
+    const x = padding + i * barWidth;
+    const y = height - barHeight - 14;
+    const rect = svgEl('rect', { x: x + 1, y: y, width: Math.max(barWidth - 2, 1), height: barHeight, fill: color, rx: 2 });
+    const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    titleNode.textContent = b.bucket + ': ' + formatValue(v);
+    rect.append(titleNode);
+    svg.append(rect);
+  });
+  card.append(svg);
+  host.append(card);
+}
+
+async function loadQueryCharts() {
+  const host = document.getElementById('query-charts-host');
+  try {
+    const data = await getJSON('/api/query-history/stats?sinceHours=48');
+    const buckets = data.buckets || [];
+    host.innerHTML = '';
+    const row = el('div', { class: 'charts-row' });
+    host.append(row);
+    renderBarChart(row, buckets, b => b.count, '#93c5fd', v => String(v) + ' queries', 'Query count (last 48h, hourly)');
+    renderBarChart(row, buckets, b => b.avgDurationMs || 0, '#f9a8d4', v => fmtMs(Math.round(v)), 'Avg duration (last 48h, hourly)');
+  } catch (e) {
+    host.innerHTML = '';
+    host.append(errBox(e));
+  }
+}
+
+// --- Query table, filter, overlay ---
+
+let queryFilterState = { status: '', search: '' };
+let queryFilterDebounce;
+
+function renderQueryFilterBar() {
+  const host = document.getElementById('query-filter-host');
+  host.innerHTML = '';
+  const select = el('select', null, [
+    el('option', { value: '' }, ['All statuses']),
+    el('option', { value: 'success' }, ['success']),
+    el('option', { value: 'error' }, ['error']),
+    el('option', { value: 'pending' }, ['pending']),
+  ]);
+  select.value = queryFilterState.status;
+  select.addEventListener('change', () => { queryFilterState.status = select.value; loadQueryTable(); });
+
+  const input = el('input', { type: 'search', placeholder: 'Search query\\u2026' });
+  input.value = queryFilterState.search;
+  input.addEventListener('input', () => {
+    queryFilterState.search = input.value.trim();
+    clearTimeout(queryFilterDebounce);
+    queryFilterDebounce = setTimeout(loadQueryTable, 300);
+  });
+
+  host.append(el('div', { class: 'filter-bar' }, [select, input]));
+}
+
+function openQueryOverlay(row) {
+  document.getElementById('overlay-title').textContent = row.requestId || ('Query #' + row.id);
+  const body = document.getElementById('overlay-body');
+  body.innerHTML = '';
+
+  const dl = el('dl', { class: 'field-grid' });
+  const fields = [
+    ['Status', row.status],
+    ['Type', row.type],
+    ['Duration', fmtMs(row.durationMs)],
+    ['Started at', fmtDate(row.startedAt)],
+    ['Completed at', fmtDate(row.completedAt)],
+    ['API type', row.apiType || ''],
+    ['Organisation ID', row.organisationId || ''],
+    ['User ID', row.userId || ''],
+    ['Request ID', row.requestId || ''],
+  ];
+  for (const [label, value] of fields) {
+    if (!value) continue;
+    dl.append(el('dt', null, [label]), el('dd', null, [String(value)]));
+  }
+  body.append(dl);
+
+  if (row.errorMessage) {
+    body.append(el('div', { class: 'muted' }, ['Error:']));
+    body.append(el('pre', null, [row.errorMessage]));
+  }
+
+  body.append(el('div', { class: 'muted' }, ['Query:']));
+  const pre = el('pre', null, []);
+  pre.innerHTML = highlightJson(row.queryJson || '{}', true);
+  body.append(pre);
+
+  document.getElementById('overlay-backdrop').hidden = false;
+}
+
+function renderQueryTable(rows) {
+  const host = document.getElementById('query-table-host');
+  host.innerHTML = '';
+  if (!rows.length) {
+    host.append(el('div', { class: 'muted' }, ['No queries recorded yet.']));
+    return;
+  }
+  const thead = el('tr', null, [
+    el('th', null, ['Status']),
+    el('th', null, ['Started at']),
+    el('th', null, ['Duration']),
+    el('th', null, ['API type']),
+    el('th', null, ['Query preview']),
+  ]);
+  const tbody = rows.map(row => {
+    const preview = el('code', { class: 'query-preview' }, []);
+    preview.innerHTML = highlightJson(row.queryJson || '{}', false);
+    const tr = el('tr', null, [
+      el('td', null, [el('span', { class: 'pill status-' + row.status }, [row.status])]),
+      el('td', null, [fmtDate(row.startedAt)]),
+      el('td', null, [fmtMs(row.durationMs)]),
+      el('td', null, [row.apiType || '']),
+      el('td', null, [preview]),
+    ]);
+    tr.addEventListener('click', () => openQueryOverlay(row));
+    return tr;
+  });
+  host.append(el('table', null, [thead, ...tbody]));
+}
+
+async function loadQueryTable() {
+  const host = document.getElementById('query-table-host');
+  try {
+    const params = new URLSearchParams();
+    if (queryFilterState.status) params.set('status', queryFilterState.status);
+    if (queryFilterState.search) params.set('search', queryFilterState.search);
+    params.set('limit', '200');
+    const data = await getJSON('/api/query-history?' + params.toString());
+    renderQueryTable(data.rows || []);
+  } catch (e) {
+    host.innerHTML = '';
+    host.append(errBox(e));
+  }
+}
+
 // --- Tabs ---
 
 document.querySelectorAll('nav button').forEach(btn => {
@@ -589,6 +814,9 @@ loadModelMeta();
 loadModelFiles();
 loadPreAggregations();
 loadBuildHistory();
+loadQueryCharts();
+renderQueryFilterBar();
+loadQueryTable();
 </script>
 </body>
 </html>
