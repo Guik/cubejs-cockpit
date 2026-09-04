@@ -26,6 +26,10 @@ export const INDEX_HTML = `<!doctype html>
   .subnav { display: flex; gap: 4px; border-bottom: 1px solid #23262b; margin-bottom: 16px; }
   .subnav button { background: none; border: none; color: #9aa4b2; padding: 8px 4px; margin-right: 16px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; }
   .subnav button.active { color: #fff; border-bottom-color: #4ade80; }
+  .timerange-bar { display: flex; gap: 6px; margin-bottom: 16px; }
+  .timerange-bar button { background: #111318; border: 1px solid #23262b; color: #9aa4b2; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .timerange-bar button:hover { border-color: #3b4252; }
+  .timerange-bar button.active { background: #1a1d22; color: #fff; border-color: #4ade80; }
   .subpanel { display: none; }
   .subpanel.active { display: block; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
@@ -150,6 +154,7 @@ export const INDEX_HTML = `<!doctype html>
     </div>
   </section>
   <section id="queries">
+    <div id="query-timerange-host"></div>
     <h2>Query volume &amp; duration</h2>
     <div id="query-charts-host" class="loading">Loading&hellip;</div>
     <h2>Queries</h2>
@@ -692,11 +697,11 @@ function renderBarChart(host, buckets, valueFn, color, formatValue, titleText) {
     }
 
     if (i % labelStride === 0) {
-      const hourLabel = svgEl('text', {
+      const xLabel = svgEl('text', {
         x: slotX + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
       });
-      hourLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit' });
-      svg.append(hourLabel);
+      xLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      svg.append(xLabel);
     }
   });
 
@@ -704,16 +709,127 @@ function renderBarChart(host, buckets, valueFn, color, formatValue, titleText) {
   host.append(card);
 }
 
+// Same axes/padding/labeling as renderBarChart, connected points instead
+// of bars -- a more natural read for a continuously-varying value like
+// average duration than discrete bars.
+function renderLineChart(host, buckets, valueFn, color, formatValue, titleText) {
+  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
+  if (!buckets.length) {
+    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
+    host.append(card);
+    return;
+  }
+  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
+  const plotHeight = height - padTop - padBottom;
+  const values = buckets.map(valueFn);
+  const max = Math.max.apply(null, values.concat([1]));
+  const slot = (width - padSide * 2) / buckets.length;
+  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
+
+  svg.append(svgEl('line', {
+    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
+    stroke: '#23262b', 'stroke-width': 1,
+  }));
+
+  const points = buckets.map((b, i) => {
+    const v = values[i];
+    const x = padSide + i * slot + slot / 2;
+    const y = height - padBottom - (max > 0 ? (v / max) * plotHeight : 0);
+    return { x: x, y: y, v: v, bucket: b.bucket };
+  });
+
+  if (points.length > 1) {
+    const pathD = points.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join(' ');
+    svg.append(svgEl('path', {
+      d: pathD, fill: 'none', stroke: color, 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+  }
+
+  const showValueLabels = buckets.length <= 24;
+  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
+
+  points.forEach((p, i) => {
+    const dot = svgEl('circle', { cx: p.x, cy: p.y, r: 3, fill: color });
+    const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    titleNode.textContent = p.bucket + ': ' + formatValue(p.v);
+    dot.append(titleNode);
+    svg.append(dot);
+
+    if (showValueLabels && p.v > 0) {
+      const label = svgEl('text', { x: p.x, y: p.y - 6, 'text-anchor': 'middle', 'font-size': '9', fill: '#9aa4b2' });
+      label.textContent = formatValue(p.v);
+      svg.append(label);
+    }
+
+    if (i % labelStride === 0) {
+      const xLabel = svgEl('text', {
+        x: p.x, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
+      });
+      xLabel.textContent = new Date(p.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      svg.append(xLabel);
+    }
+  });
+
+  card.append(svg);
+  host.append(card);
+}
+
+// --- Time range selector (drives both the charts and the table below) ---
+
+const TIME_RANGES = [
+  { label: '5m', minutes: 5 },
+  { label: '15m', minutes: 15 },
+  { label: '1h', minutes: 60 },
+  { label: '6h', minutes: 6 * 60 },
+  { label: '24h', minutes: 24 * 60 },
+  { label: '7d', minutes: 7 * 24 * 60 },
+];
+
+function loadStoredTimeRangeMinutes() {
+  try {
+    const stored = Number(localStorage.getItem('qh-timerange-minutes'));
+    if (TIME_RANGES.some(r => r.minutes === stored)) return stored;
+  } catch (e) { /* localStorage unavailable (private browsing, etc.) -- fall through to default */ }
+  return 60;
+}
+
+let queryTimeRangeMinutes = loadStoredTimeRangeMinutes();
+
+function currentRangeLabel() {
+  const match = TIME_RANGES.find(r => r.minutes === queryTimeRangeMinutes);
+  return match ? match.label : (queryTimeRangeMinutes + 'm');
+}
+
+function renderTimeRangeBar() {
+  const host = document.getElementById('query-timerange-host');
+  host.innerHTML = '';
+  const bar = el('div', { class: 'timerange-bar' });
+  for (const range of TIME_RANGES) {
+    const btn = el('button', {}, ['Last ' + range.label]);
+    if (range.minutes === queryTimeRangeMinutes) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      queryTimeRangeMinutes = range.minutes;
+      try { localStorage.setItem('qh-timerange-minutes', String(range.minutes)); } catch (e) { /* ignore */ }
+      renderTimeRangeBar();
+      loadQueryCharts();
+      loadQueryTable();
+    });
+    bar.append(btn);
+  }
+  host.append(bar);
+}
+
 async function loadQueryCharts() {
   const host = document.getElementById('query-charts-host');
   try {
-    const data = await getJSON('/api/query-history/stats?sinceHours=48');
+    const data = await getJSON('/api/query-history/stats?sinceMinutes=' + queryTimeRangeMinutes);
     const buckets = data.buckets || [];
     host.innerHTML = '';
     const row = el('div', { class: 'charts-row' });
     host.append(row);
-    renderBarChart(row, buckets, b => b.count, '#93c5fd', v => String(v) + ' queries', 'Query count (last 48h, hourly)');
-    renderBarChart(row, buckets, b => b.avgDurationMs || 0, '#f9a8d4', v => fmtMs(Math.round(v)), 'Avg duration (last 48h, hourly)');
+    renderBarChart(row, buckets, b => b.count, '#93c5fd', v => String(v) + ' queries', 'Query count (last ' + currentRangeLabel() + ')');
+    renderLineChart(row, buckets, b => b.avgDurationMs || 0, '#f9a8d4', v => fmtMs(Math.round(v)), 'Avg duration (last ' + currentRangeLabel() + ')');
   } catch (e) {
     host.innerHTML = '';
     host.append(errBox(e));
@@ -844,6 +960,7 @@ async function loadQueryTable() {
     const params = new URLSearchParams();
     if (queryFilterState.status) params.set('status', queryFilterState.status);
     if (queryFilterState.search) params.set('search', queryFilterState.search);
+    params.set('sinceMinutes', String(queryTimeRangeMinutes));
     params.set('limit', '200');
     const data = await getJSON('/api/query-history?' + params.toString());
     renderQueryTable(data.rows || []);
@@ -854,29 +971,50 @@ async function loadQueryTable() {
 }
 
 // --- Tabs ---
+//
+// Active tab/sub-tab persisted in localStorage so a page refresh lands
+// back where you were, instead of always resetting to Data model -- the
+// HTML's baked-in 'active' classes are just the pre-load fallback, applied
+// before any localStorage read is possible.
+
+function activateTab(tabName) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('active', s.id === tabName));
+}
+
+function activateSubtab(subtabName) {
+  document.querySelectorAll('.subnav button').forEach(b => b.classList.toggle('active', b.dataset.subtab === subtabName));
+  document.querySelectorAll('.subpanel').forEach(s => s.classList.toggle('active', s.id === 'preaggs-' + subtabName));
+}
 
 document.querySelectorAll('nav button').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.add('active');
+    activateTab(btn.dataset.tab);
+    try { localStorage.setItem('qh-active-tab', btn.dataset.tab); } catch (e) { /* ignore */ }
   });
 });
 
 document.querySelectorAll('.subnav button').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.subnav button').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.subpanel').forEach(s => s.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById('preaggs-' + btn.dataset.subtab).classList.add('active');
+    activateSubtab(btn.dataset.subtab);
+    try { localStorage.setItem('qh-active-subtab', btn.dataset.subtab); } catch (e) { /* ignore */ }
   });
 });
+
+try {
+  const storedTab = localStorage.getItem('qh-active-tab');
+  if (storedTab && document.getElementById(storedTab)) activateTab(storedTab);
+} catch (e) { /* localStorage unavailable -- keep the HTML default */ }
+try {
+  const storedSubtab = localStorage.getItem('qh-active-subtab');
+  if (storedSubtab && document.getElementById('preaggs-' + storedSubtab)) activateSubtab(storedSubtab);
+} catch (e) { /* ignore */ }
 
 loadModelMeta();
 loadModelFiles();
 loadPreAggregations();
 loadBuildHistory();
+renderTimeRangeBar();
 loadQueryCharts();
 renderQueryFilterBar();
 loadQueryTable();

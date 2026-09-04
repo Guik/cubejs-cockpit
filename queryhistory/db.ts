@@ -211,6 +211,7 @@ const SELECT_COLUMNS = `
 export interface ListParams {
   status?: string;
   search?: string;
+  sinceMinutes?: number;
   limit?: number;
   offset?: number;
 }
@@ -226,6 +227,10 @@ export function listEvents(params: ListParams): { rows: QueryEventRow[]; total: 
   if (params.search) {
     clauses.push("query_json LIKE ?");
     args.push(`%${params.search}%`);
+  }
+  if (params.sinceMinutes) {
+    clauses.push("completed_at >= ?");
+    args.push(new Date(Date.now() - params.sinceMinutes * 60 * 1000).toISOString());
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const limit = Math.min(Math.max(params.limit ?? 200, 1), 1000);
@@ -254,19 +259,45 @@ export interface StatsBucket {
   errorCount: number;
 }
 
-export function statsBuckets(sinceHours: number): StatsBucket[] {
+// Bucket width scales with the selected range -- 1-minute buckets for "last
+// 5 minutes" would be fine, but hourly buckets for the same range would
+// show one or two bars total; the reverse (1-minute buckets over 7 days)
+// would be thousands of bars. Picked so a full range renders as roughly
+// 15-40 bars regardless of which preset is selected.
+function bucketSecondsFor(sinceMinutes: number): number {
+  if (sinceMinutes <= 15) return 60; // 1 minute
+  if (sinceMinutes <= 60) return 2 * 60; // 2 minutes
+  if (sinceMinutes <= 6 * 60) return 15 * 60; // 15 minutes
+  if (sinceMinutes <= 24 * 60) return 60 * 60; // 1 hour
+  if (sinceMinutes <= 7 * 24 * 60) return 6 * 60 * 60; // 6 hours
+  return 24 * 60 * 60; // 1 day
+}
+
+export function statsBuckets(sinceMinutes: number): StatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
+  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  // Groups rows into fixed-width time buckets by integer-dividing the unix
+  // timestamp, rather than strftime('%H:00', ...) (hour-string formatting,
+  // which can only ever produce hour-wide buckets) -- this works uniformly
+  // for any bucket width, from 1 minute to multi-day.
   return database
     .prepare(
-      `SELECT strftime('%Y-%m-%dT%H:00:00', completed_at) as bucket,
-              COUNT(*) as count,
-              AVG(duration_ms) as avgDurationMs,
-              SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount
+      // CAST(? AS INTEGER) on the bound parameters too, not just the
+      // column -- without it SQLite performs real (floating-point)
+      // division against a JS number parameter, so nothing actually
+      // truncates to a bucket boundary and every row ends up in its own
+      // "bucket" (verified locally: silently produces one bar per row,
+      // no grouping, before this cast was added).
+      `SELECT
+         datetime((CAST(strftime('%s', completed_at) AS INTEGER) / CAST(? AS INTEGER)) * CAST(? AS INTEGER), 'unixepoch') as bucket,
+         COUNT(*) as count,
+         AVG(duration_ms) as avgDurationMs,
+         SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount
        FROM query_events
        WHERE completed_at >= ?
        GROUP BY bucket
        ORDER BY bucket ASC`
     )
-    .all(since) as unknown as StatsBucket[];
+    .all(bucketSeconds, bucketSeconds, since) as unknown as StatsBucket[];
 }

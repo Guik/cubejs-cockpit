@@ -44,6 +44,7 @@ export const list = api.raw(
     const params = {
       status: url.searchParams.get("status") || undefined,
       search: url.searchParams.get("search") || undefined,
+      sinceMinutes: url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : undefined,
       limit: url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined,
       offset: url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : undefined,
     };
@@ -55,8 +56,8 @@ export const stats = api.raw(
   { expose: true, method: "GET", path: "/api/query-history/stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceHours = url.searchParams.has("sinceHours") ? Number(url.searchParams.get("sinceHours")) : 24;
-    sendJson(resp, 200, { buckets: statsBuckets(sinceHours) });
+    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
+    sendJson(resp, 200, { buckets: statsBuckets(sinceMinutes) });
   }
 );
 
