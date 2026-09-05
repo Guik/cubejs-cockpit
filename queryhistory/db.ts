@@ -7,7 +7,7 @@
 // File-backed on a docker-compose volume (not the ephemeral container
 // filesystem) so history survives container recreation, unlike the
 // cube_api container logs this data is sourced from.
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -306,7 +306,7 @@ export interface ListParams {
 export function listEvents(params: ListParams): { rows: QueryEventRow[]; total: number } {
   const database = getDb();
   const clauses: string[] = [];
-  const args: unknown[] = [];
+  const args: SQLInputValue[] = [];
   if (params.status) {
     clauses.push("status = ?");
     args.push(params.status);

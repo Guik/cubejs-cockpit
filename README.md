@@ -32,7 +32,11 @@ arm64 dev machine.
 
 ## Running locally
 
+Requires Node 22.5+ (for the built-in `node:sqlite` module) and the
+[Encore CLI](https://encore.dev/docs/ts/install).
+
 ```bash
+npm install
 encore run
 ```
 
@@ -137,3 +141,14 @@ directly, in one step it doesn't expose a way to split into "compile" and
 "package" stages. A conventional multi-stage Dockerfile can't reproduce
 that without reimplementing Encore's own compiler, so `scripts/build.sh`
 (wrapping the CLI) is the actual build step, not a placeholder for one.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, expectations
+before opening a PR, and project scope/style notes. Please read
+[SECURITY.md](SECURITY.md) before deploying this anywhere -- several of
+its endpoints and config values need to be treated as sensitive.
+
+## License
+
+[MIT](LICENSE)

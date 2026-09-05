@@ -5,3 +5,17 @@ encore.gen.cue
 node_modules
 /encore.gen
 *.tsbuildinfo
+
+# OS
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Local data
+*.db
+*.db-journal
+/data
+/.dashboard-data

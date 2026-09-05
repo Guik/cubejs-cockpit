@@ -3,10 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "description": "Self-hosted ops dashboard for a Cube.js deployment: data model, pre-aggregation status, query history, and performance.",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "author": "Guillaume",
   "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "devDependencies": {
-    "@types/node": "^20.5.7",
+    "@types/node": "^22.20.1",
     "typescript": "^5.2.2"
   },
   "dependencies": {

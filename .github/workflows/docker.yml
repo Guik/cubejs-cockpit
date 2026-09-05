@@ -1,0 +1,74 @@
+name: Docker image
+
+# Builds the image with `encore build docker` (see scripts/build.sh and the
+# README's "Building for deployment" section for why there's no Dockerfile).
+# PRs only build, to make sure nothing broke -- nothing is pushed until it
+# lands on main or a version tag, and forked-repo PRs never see registry
+# credentials.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Encore CLI
+        run: |
+          curl -fsSL https://encore.dev/install.sh | bash
+          echo "$HOME/.encore/bin" >> "$GITHUB_PATH"
+
+      - name: Lowercase image name
+        id: image
+        run: echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: encore build docker "${{ steps.image.outputs.name }}:ci"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          image="${{ steps.image.outputs.name }}"
+
+          docker tag "$image:ci" "$image:sha-${GITHUB_SHA::12}"
+          docker push "$image:sha-${GITHUB_SHA::12}"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            docker tag "$image:ci" "$image:$version"
+            docker push "$image:$version"
+          fi
+
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            docker tag "$image:ci" "$image:latest"
+            docker push "$image:latest"
+          fi
