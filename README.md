@@ -33,37 +33,31 @@ arm64 dev machine.
 | `frontend` | The single-page dashboard UI (embedded HTML/CSS/JS, no build step, no external UI framework). |
 | `shared` | Internal helpers: Cube API token minting/fetch, Cube Store queries, schema file reads. |
 
-## Running locally
+## Adding to an existing Cube deployment
 
-Requires Node 22.5+ (for the built-in `node:sqlite` module) and the
-[Encore CLI](https://encore.dev/docs/ts/install).
+The common case: you already run Cube API and Cube Store yourself. Add
+the `cubejs_cockpit` service from [docker-compose.yml](docker-compose.yml)
+to your existing docker-compose.yml, and add its three
+`QUERY_HISTORY_*`/`PERFORMANCE_*` ingest env vars to your real `cube_api`
+service (see **Integrating with Cube.js** below for exactly what those
+forward). `CUBEJS_API_SECRET` and `CUBEJS_PLAYGROUND_AUTH_SECRET` must
+match your deployment's own secrets exactly, and the dashboard's schema
+volume must point at the same `schema/` directory your `cube_api` loads
+from.
 
-```bash
-npm install
-encore run
-```
-
-Open <http://localhost:9400/> for Encore's local dev dashboard, or
-<http://localhost:4000/> for the app itself. Local SQLite files default to
-`/app/data/*.db`, which won't exist on a dev machine outside the container
-image -- point them somewhere writable:
-
-```bash
-QUERY_HISTORY_DB_PATH=/tmp/dashboard-data/query-history.db \
-PERFORMANCE_DB_PATH=/tmp/dashboard-data/performance.db \
-encore run
-```
-
-Without a reachable `cube_api`/Cube Store, the data-model and
-pre-aggregation views will error on load -- that's expected when running
-standalone; the query history and performance views work fine against
-data posted directly to their ingest endpoints (see **API** below).
+`cubejs_cockpit`'s image is pulled from `ghcr.io/guik/cubejs-cockpit`,
+published automatically by this repo's own GitHub Actions on every push
+to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
+[.github/workflows/docker.yml](.github/workflows/docker.yml). No local
+build is required; see **Building your own image** below if you want one
+anyway.
 
 ## Running the full stack
 
-[docker-compose.yml](docker-compose.yml) runs Cube API, Cube Store, and
-this dashboard together, wired to share one `.env` and the same schema
-volume -- the setup this project is actually meant to be run as.
+Don't have a Cube deployment yet, or want this repo to own the whole
+thing? [docker-compose.yml](docker-compose.yml) runs Cube API, Cube
+Store, and this dashboard together as one stack, wired to share a single
+`.env` and the same schema volume.
 
 1. Put your own `cube.js` config and `schema/` directory next to
    `docker-compose.yml` (not included here -- they're specific to your
@@ -73,27 +67,9 @@ volume -- the setup this project is actually meant to be run as.
    driver needs (DB credentials, etc.) -- `cube_api` reads the same file.
 3. `docker compose up -d`
 
-`cubejs_cockpit`'s image is pulled from `ghcr.io/guik/cubejs-cockpit`,
-published automatically by this repo's own GitHub Actions on every push
-to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
-[.github/workflows/docker.yml](.github/workflows/docker.yml). No local
-build is required; see **Building your own image** below if you want one
-anyway.
-
 Cube API ends up on `localhost:4000`, the dashboard on
 `127.0.0.1:8091` (deliberately not `0.0.0.0` -- see
 [SECURITY.md](SECURITY.md)).
-
-### Adding to an existing Cube deployment
-
-Already running your own Cube stack? You don't need the whole compose
-file -- just add the `cubejs_cockpit` service from it to your existing
-docker-compose.yml, and add its three `QUERY_HISTORY_*`/`PERFORMANCE_*`
-ingest env vars to your real `cube_api` service (see **Integrating with
-Cube.js** below for exactly what those forward). `CUBEJS_API_SECRET` and
-`CUBEJS_PLAYGROUND_AUTH_SECRET` must match your deployment's own secrets
-exactly, and the dashboard's schema volume must point at the same
-`schema/` directory your `cube_api` loads from.
 
 ## Configuration
 
@@ -187,6 +163,34 @@ directly, in one step it doesn't expose a way to split into "compile" and
 "package" stages. A conventional multi-stage Dockerfile can't reproduce
 that without reimplementing Encore's own compiler, so `scripts/build.sh`
 (wrapping the CLI) is the actual build step, not a placeholder for one.
+
+## Development
+
+### Running locally
+
+Requires Node 22.5+ (for the built-in `node:sqlite` module) and the
+[Encore CLI](https://encore.dev/docs/ts/install).
+
+```bash
+npm install
+encore run
+```
+
+Open <http://localhost:9400/> for Encore's local dev dashboard, or
+<http://localhost:4000/> for the app itself. Local SQLite files default to
+`/app/data/*.db`, which won't exist on a dev machine outside the container
+image -- point them somewhere writable:
+
+```bash
+QUERY_HISTORY_DB_PATH=/tmp/dashboard-data/query-history.db \
+PERFORMANCE_DB_PATH=/tmp/dashboard-data/performance.db \
+encore run
+```
+
+Without a reachable `cube_api`/Cube Store, the data-model and
+pre-aggregation views will error on load -- that's expected when running
+standalone; the query history and performance views work fine against
+data posted directly to their ingest endpoints (see **API** above).
 
 ## Contributing
 
