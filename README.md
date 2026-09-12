@@ -40,7 +40,7 @@ cubejs_cockpit:
     - "9080:8080"
   networks:
     default:
-      aliases: [cube_dashboard] # rename this service freely; keep the alias in sync instead
+      aliases: [cube_dashboard] # whatever hostname your cube.js *_INGEST_URL vars call back to
   environment:
     - CUBE_API_INTERNAL_URL=http://cube_api:4000
     - CUBESTORE_HOST=cubestore
