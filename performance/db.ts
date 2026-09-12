@@ -173,3 +173,36 @@ export function errorStatsBuckets(sinceMinutes: number): ErrorStatsBucket[] {
     )
     .all(bucketSeconds, bucketSeconds, since) as unknown as ErrorStatsBucket[];
 }
+
+export interface RecentErrorEntry {
+  kind: string;
+  type: string | null;
+  requestId: string | null;
+  context: string | null;
+  errorMessage: string | null;
+  occurredAt: string;
+}
+
+// The charts above only ever aggregate to a count -- this is the detail
+// that count hides: what actually failed, for which request, with what
+// message. Pulls in failed compile_events too (kind: 'compile') since a
+// broken schema deploy is the same "something's wrong" signal an operator
+// is looking for here, even though it's stored in a separate table.
+export function recentErrors(sinceMinutes: number, limit = 50): RecentErrorEntry[] {
+  const database = getDb();
+  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  return database
+    .prepare(
+      `SELECT kind, type, request_id as requestId, context, error_message as errorMessage, occurred_at as occurredAt
+         FROM error_events
+        WHERE occurred_at >= ?
+        UNION ALL
+       SELECT 'compile' as kind, 'Compiling schema error' as type, request_id as requestId, NULL as context,
+              error_message as errorMessage, completed_at as occurredAt
+         FROM compile_events
+        WHERE status = 'error' AND completed_at >= ?
+        ORDER BY occurredAt DESC
+        LIMIT ?`
+    )
+    .all(since, since, limit) as unknown as RecentErrorEntry[];
+}

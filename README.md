@@ -242,6 +242,7 @@ it reads plain `process.env` rather than Encore's secrets manager):
 | GET | `/api/performance/compile-stats` | Time-bucketed compilation count/wait-time. |
 | POST | `/api/performance/error-ingest` | Receives one auth-failure or pre-agg build-job-error event. |
 | GET | `/api/performance/error-stats` | Time-bucketed error count by kind. |
+| GET | `/api/performance/recent-errors` | Most recent auth failures, pre-agg build errors, and failed schema compiles, with the actual message/context behind each. |
 
 None of these endpoints authenticate callers beyond network reachability --
 they're meant to sit behind the same private network boundary as the rest

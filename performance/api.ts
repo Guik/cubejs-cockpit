@@ -6,6 +6,7 @@ import {
   insertErrorEvent,
   errorStatsBuckets,
   ErrorIngestEvent,
+  recentErrors,
 } from "./db";
 
 // api.raw, matching queryhistory/api.ts's established pattern in this
@@ -69,5 +70,16 @@ export const errorStats = api.raw(
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
     sendJson(resp, 200, { buckets: errorStatsBuckets(sinceMinutes) });
+  }
+);
+
+// The detail behind errorStats' counts: individual auth failures, pre-agg
+// build errors, and failed schema compiles, most recent first.
+export const recentErrorsList = api.raw(
+  { expose: true, method: "GET", path: "/api/performance/recent-errors" },
+  async (req, resp) => {
+    const url = new URL(req.url || "", "http://internal");
+    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
+    sendJson(resp, 200, { errors: recentErrors(sinceMinutes) });
   }
 );

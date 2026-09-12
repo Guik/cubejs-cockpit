@@ -63,6 +63,10 @@ export const INDEX_HTML = `<!doctype html>
   .pill.source-scan { background: #3a2313; color: #fdba74; }
   .pill.source-unknown { background: #1a1d22; color: #6b7280; }
   .pill.cache-stale { background: #3a3313; color: #fde68a; margin-left: 4px; }
+  .pill.kind-auth { background: #3a1e2e; color: #f9a8d4; }
+  .pill.kind-preagg-build { background: #3a2313; color: #fdba74; }
+  .pill.kind-compile { background: #2a1e3a; color: #c4b5fd; }
+  .error-message { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: #d1d5db; }
   .json-key { color: #93c5fd; }
   .json-string { color: #86efac; }
   .json-number { color: #fdba74; }
@@ -186,6 +190,7 @@ export const INDEX_HTML = `<!doctype html>
     <div id="perf-compile-charts-host" class="loading">Loading&hellip;</div>
     <h2>Errors</h2>
     <div id="perf-errors-host" class="loading">Loading&hellip;</div>
+    <div id="perf-errors-list-host" class="loading">Loading&hellip;</div>
   </section>
 </main>
 
@@ -1172,6 +1177,49 @@ async function loadErrorCharts() {
   }
 }
 
+// The chart above only ever shows a count -- this is the detail behind it:
+// what actually failed, for which request, with what message.
+const ERROR_KIND_LABELS_FULL = { 'auth': 'Auth failure', 'preagg-build': 'Pre-agg build error', 'compile': 'Compile error' };
+
+function renderErrorsList(rows) {
+  const host = document.getElementById('perf-errors-list-host');
+  host.innerHTML = '';
+  if (!rows.length) {
+    host.append(el('div', { class: 'muted' }, ['No errors in this range.']));
+    return;
+  }
+  const thead = el('tr', null, [
+    el('th', null, ['Time']),
+    el('th', null, ['Kind']),
+    el('th', null, ['Type']),
+    el('th', null, ['Request']),
+    el('th', null, ['Message']),
+  ]);
+  const tbody = rows.map(row => {
+    const kindCls = 'kind-' + row.kind;
+    const message = row.errorMessage || (row.context ? row.context : '');
+    return el('tr', null, [
+      el('td', null, [fmtDate(row.occurredAt)]),
+      el('td', null, [el('span', { class: 'pill ' + kindCls }, [ERROR_KIND_LABELS_FULL[row.kind] || row.kind])]),
+      el('td', null, [row.type || '']),
+      el('td', null, [row.requestId || '']),
+      el('td', null, [el('span', { class: 'error-message' }, [message])]),
+    ]);
+  });
+  host.append(el('table', null, [thead, ...tbody]));
+}
+
+async function loadRecentErrors() {
+  const host = document.getElementById('perf-errors-list-host');
+  try {
+    const data = await getJSON('/api/performance/recent-errors?sinceMinutes=' + queryTimeRangeMinutes);
+    renderErrorsList(data.errors || []);
+  } catch (e) {
+    host.innerHTML = '';
+    host.append(errBox(e));
+  }
+}
+
 // --- Query table, filter, overlay ---
 
 let queryFilterState = { status: '', search: '' };
@@ -1436,12 +1484,14 @@ onTimeRangeChange(loadQueryTable);
 onTimeRangeChange(loadPerformanceCharts);
 onTimeRangeChange(loadPerformanceMixCharts);
 onTimeRangeChange(loadErrorCharts);
+onTimeRangeChange(loadRecentErrors);
 loadQueryCharts();
 renderQueryFilterBar();
 loadQueryTable();
 loadPerformanceCharts();
 loadPerformanceMixCharts();
 loadErrorCharts();
+loadRecentErrors();
 </script>
 </body>
 </html>
