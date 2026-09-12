@@ -1,11 +1,18 @@
 # cubejs-cockpit
 
-Self-hosted operations dashboard for a Cube.js / Cube Core deployment: the
-data model actually running (not just what a schema file is assumed to
-say), pre-aggregation status and build history, a persistent query history
-with cache/pre-aggregation attribution, and a Performance view (cache-type
-breakdown, data model compilation wait time, request mix, auth/build
-errors).
+Self-hosted operations dashboard for a Cube.js / Cube Core deployment.
+
+## Features
+
+- **Live data model** -- the cube/measure/dimension metadata and raw
+  schema source actually running, not just what a schema file is assumed
+  to say.
+- **Pre-aggregation status & build history** -- partition status and
+  rebuild timeline read straight from Cube Store.
+- **Persistent query history** -- every query with duration, status,
+  cache type, and pre-aggregation attribution.
+- **Performance view** -- cache-type breakdown, data model compilation
+  wait time, request mix by API type, and an auth/build errors feed.
 
 It is a companion to a Cube.js deployment, not a Cube.js deployment itself.
 It talks to `cube_api` (REST/system API) and Cube Store (MySQL wire
