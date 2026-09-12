@@ -21,17 +21,6 @@ to a local file, deliberately chosen over any native-addon driver so
 `encore build docker` can cross-compile cleanly for `linux/amd64` from an
 arm64 dev machine.
 
-## Services
-
-| Service | Purpose |
-| --- | --- |
-| `datamodel` | Live cube/measure/dimension metadata from `/cubejs-api/v1/meta`, plus the raw schema source files. |
-| `preaggregations` | Pre-aggregation partition status and build history, read from Cube Store's `system.*` tables. |
-| `queryhistory` | Ingests and serves per-query history: duration, status, cache type, pre-aggregations used, security context. |
-| `performance` | Data model compilation timing and a recent-errors feed (auth failures, pre-aggregation build job errors). |
-| `frontend` | The single-page dashboard UI (embedded HTML/CSS/JS, no build step, no external UI framework). |
-| `shared` | Internal helpers: Cube API token minting/fetch, Cube Store queries, schema file reads. |
-
 ## Getting started
 
 Add a `cubejs_cockpit` service to your existing Cube.js docker-compose.yml,
@@ -114,32 +103,6 @@ add latency or failure risk to a real Cube query -- every forwarder on the
 Cube.js side should be a non-awaited `fetch()` with a short timeout, per
 the pattern already established there.
 
-## API
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/api/model/meta` | Live cube/measure/dimension metadata. |
-| GET | `/api/model/files` | Raw schema source files. |
-| GET | `/api/pre-aggregations` | Pre-aggregation list. |
-| GET | `/api/pre-aggregations/partitions` | Per-partition detail. |
-| GET | `/api/pre-aggregations/build-history` | Rebuild timeline from Cube Store. |
-| POST | `/api/query-history/ingest` | Receives one query-lifecycle event from Cube.js. |
-| GET | `/api/query-history` | Filterable/paginated query list. |
-| GET | `/api/query-history/detail` | Full stored detail for one query. |
-| GET | `/api/query-history/stats` | Time-bucketed count/duration/error-count. |
-| GET | `/api/query-history/cache-stats` | Time-bucketed count/duration by cache type. |
-| GET | `/api/query-history/api-type-stats` | Time-bucketed count by API type. |
-| GET | `/api/query-history/stale-cache-stats` | Time-bucketed stale-cache-served rate. |
-| POST | `/api/performance/compile-ingest` | Receives one schema-compilation event. |
-| GET | `/api/performance/compile-stats` | Time-bucketed compilation count/wait-time. |
-| POST | `/api/performance/error-ingest` | Receives one auth-failure or pre-agg build-job-error event. |
-| GET | `/api/performance/error-stats` | Time-bucketed error count by kind. |
-
-None of these endpoints authenticate callers beyond network reachability --
-they're meant to sit behind the same private network boundary as the rest
-of the Cube stack (never exposed on a public interface), the same trust
-model Cube Store's own unauthenticated MySQL port already relies on.
-
 ## Building your own image
 
 Most deployments don't need this -- pull `ghcr.io/guik/cubejs-cockpit:latest`
@@ -167,6 +130,43 @@ that without reimplementing Encore's own compiler, so `scripts/build.sh`
 (wrapping the CLI) is the actual build step, not a placeholder for one.
 
 ## Development
+
+### Services
+
+| Service | Purpose |
+| --- | --- |
+| `datamodel` | Live cube/measure/dimension metadata from `/cubejs-api/v1/meta`, plus the raw schema source files. |
+| `preaggregations` | Pre-aggregation partition status and build history, read from Cube Store's `system.*` tables. |
+| `queryhistory` | Ingests and serves per-query history: duration, status, cache type, pre-aggregations used, security context. |
+| `performance` | Data model compilation timing and a recent-errors feed (auth failures, pre-aggregation build job errors). |
+| `frontend` | The single-page dashboard UI (embedded HTML/CSS/JS, no build step, no external UI framework). |
+| `shared` | Internal helpers: Cube API token minting/fetch, Cube Store queries, schema file reads. |
+
+### API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/model/meta` | Live cube/measure/dimension metadata. |
+| GET | `/api/model/files` | Raw schema source files. |
+| GET | `/api/pre-aggregations` | Pre-aggregation list. |
+| GET | `/api/pre-aggregations/partitions` | Per-partition detail. |
+| GET | `/api/pre-aggregations/build-history` | Rebuild timeline from Cube Store. |
+| POST | `/api/query-history/ingest` | Receives one query-lifecycle event from Cube.js. |
+| GET | `/api/query-history` | Filterable/paginated query list. |
+| GET | `/api/query-history/detail` | Full stored detail for one query. |
+| GET | `/api/query-history/stats` | Time-bucketed count/duration/error-count. |
+| GET | `/api/query-history/cache-stats` | Time-bucketed count/duration by cache type. |
+| GET | `/api/query-history/api-type-stats` | Time-bucketed count by API type. |
+| GET | `/api/query-history/stale-cache-stats` | Time-bucketed stale-cache-served rate. |
+| POST | `/api/performance/compile-ingest` | Receives one schema-compilation event. |
+| GET | `/api/performance/compile-stats` | Time-bucketed compilation count/wait-time. |
+| POST | `/api/performance/error-ingest` | Receives one auth-failure or pre-agg build-job-error event. |
+| GET | `/api/performance/error-stats` | Time-bucketed error count by kind. |
+
+None of these endpoints authenticate callers beyond network reachability --
+they're meant to sit behind the same private network boundary as the rest
+of the Cube stack (never exposed on a public interface), the same trust
+model Cube Store's own unauthenticated MySQL port already relies on.
 
 ### Running locally
 
