@@ -44,9 +44,8 @@ cubejs_cockpit:
     - cubestore
 ```
 
-See [docker-compose.yml](docker-compose.yml) in this repo for the full
-reference (including `cube_api`/`cubestore` for context and the exact
-env var list). Three things to get right:
+See the **Configuration** table below for the full env var list. Three
+things to get right:
 
 - `CUBEJS_API_SECRET` and `CUBEJS_PLAYGROUND_AUTH_SECRET` must match your
   deployment's own secrets exactly.
@@ -61,8 +60,7 @@ The image is published automatically by this repo's own GitHub Actions on
 every push to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
 [.github/workflows/docker.yml](.github/workflows/docker.yml). No local
 build is required; see **Building your own image** below if you want one
-anyway. Cube Store's port and this dashboard's port should both stay
-bound to a private address, not `0.0.0.0` -- see [SECURITY.md](SECURITY.md).
+anyway.
 
 ## Configuration
 
@@ -118,7 +116,7 @@ maintaining a fork:
 Wraps `encore build docker`, cross-compiling for `linux/amd64` regardless
 of the build machine's architecture. Load the resulting image on the
 target host (`docker save | ssh host docker load`, or push to a registry),
-then point `docker-compose.yml`'s `cubejs_cockpit.image` at it instead of
+then point your compose file's `cubejs_cockpit` service at it instead of
 the `ghcr.io` tag.
 
 There is no hand-written `Dockerfile`: Encore's own compiler is the build
