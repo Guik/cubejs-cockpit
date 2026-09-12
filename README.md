@@ -106,7 +106,23 @@ this app is reachable from the Cube containers:
 A forwarder that can't reach this app (down, slow, unreachable) must never
 add latency or failure risk to a real Cube query -- every forwarder on the
 Cube.js side should be a non-awaited `fetch()` with a short timeout, per
-the pattern already established there.
+the pattern already established there. That resilience cuts both ways,
+though: a forwarder that can't resolve the hostname fails exactly the same
+silent way as one that's merely offline, so renaming this service in your
+compose file (or swapping which container runs it) breaks event ingestion
+with no error anywhere -- the symptom is history that quietly stops
+growing, not a crash. If you expect to rename it again, give the service a
+stable [network
+alias](https://docs.docker.com/reference/compose-file/services/#aliases)
+matching whatever hostname the `*_INGEST_URL` vars already use, so the
+Cube-side config never has to change:
+
+```yaml
+cubejs_cockpit:
+  networks:
+    default:
+      aliases: [cube_dashboard] # keep resolving under the old name too
+```
 
 ## Building your own image
 
