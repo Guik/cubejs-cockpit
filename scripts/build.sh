@@ -8,16 +8,16 @@
 #
 # Run on whatever machine has Docker; the resulting image then needs
 # loading onto the host that will actually run it, e.g.:
-#   docker save cube-dashboard:latest | gzip | ssh host 'gunzip | docker load'
+#   docker save cubejs-cockpit:latest | gzip | ssh host 'gunzip | docker load'
 # and finally brought up by that host's docker-compose stack (which lives
 # in the Cube deployment repo, not here).
 #
 #   ./scripts/build.sh
-#   ./scripts/build.sh cube-dashboard:2026-09-04   # custom tag
+#   ./scripts/build.sh cubejs-cockpit:2026-09-04   # custom tag
 
 set -euo pipefail
 
-TAG="${1:-cube-dashboard:latest}"
+TAG="${1:-cubejs-cockpit:latest}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 command -v encore >/dev/null || {

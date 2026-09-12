@@ -9,7 +9,7 @@ export const INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Cube ops dashboard</title>
+<title>cubejs-cockpit</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, system-ui, sans-serif; margin: 0; background: #0b0d10; color: #e6e6e6; }
@@ -136,7 +136,7 @@ export const INDEX_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <h1>Cube ops dashboard &middot; self-hosted</h1>
+  <h1>cubejs-cockpit &middot; self-hosted</h1>
   <nav>
     <button data-tab="model" class="active">Data model</button>
     <button data-tab="preaggs">Pre-aggregations</button>

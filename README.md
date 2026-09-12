@@ -1,4 +1,4 @@
-# Cube ops dashboard
+# cubejs-cockpit
 
 Self-hosted operations dashboard for a Cube.js / Cube Core deployment: the
 data model actually running (not just what a schema file is assumed to
@@ -122,8 +122,8 @@ model Cube Store's own unauthenticated MySQL port already relies on.
 ## Building for deployment
 
 ```bash
-./scripts/build.sh                        # builds cube-dashboard:latest
-./scripts/build.sh cube-dashboard:2026-01-01   # custom tag
+./scripts/build.sh                        # builds cubejs-cockpit:latest
+./scripts/build.sh cubejs-cockpit:2026-01-01   # custom tag
 ```
 
 Wraps `encore build docker`, cross-compiling for `linux/amd64` regardless

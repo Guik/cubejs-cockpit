@@ -1,5 +1,5 @@
 {
-  "name": "cube-dashboard",
+  "name": "cubejs-cockpit",
   "private": true,
   "version": "0.1.0",
   "description": "Self-hosted ops dashboard for a Cube.js deployment: data model, pre-aggregation status, query history, and performance.",

@@ -48,7 +48,7 @@ services:
   # --- The dashboard itself ---
 
   cube_dashboard:
-    image: cube-dashboard:latest
+    image: cubejs-cockpit:latest
     ports:
       # Serves pre-aggregation data gated only by CUBEJS_PLAYGROUND_AUTH_SECRET
       # (which bypasses your queryRewrite's row-level filtering) and the raw

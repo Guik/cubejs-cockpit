@@ -48,7 +48,7 @@ export function mintApiToken(ttlSeconds = 300): string {
   return signJwt(
     {
       iat: now,
-      iss: "cube-dashboard",
+      iss: "cubejs-cockpit",
       nbf: now,
       exp: now + ttlSeconds,
       user_id: 0,
