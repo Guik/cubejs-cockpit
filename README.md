@@ -11,10 +11,9 @@ It is a companion to a Cube.js deployment, not a Cube.js deployment itself.
 It talks to `cube_api` (REST/system API) and Cube Store (MySQL wire
 protocol) over the internal network of whatever stack deploys it, and
 receives a stream of query/cache/error events forwarded by that stack's
-`cube.js` custom `logger` (see **Integrating with Cube.js** below). This
-repo ships a [docker-compose.yml](docker-compose.yml) that runs Cube API,
-Cube Store, and this dashboard together as one stack, sharing a single
-`.env` and the same schema volume -- see **Running the full stack**.
+`cube.js` custom `logger` (see **Integrating with Cube.js** below). See
+**Getting started** for adding it to your own Cube.js docker-compose.yml
+using the public image.
 
 Built with [Encore.ts](https://encore.dev/docs/ts). No external database or
 cache dependency: history is persisted with Node's built-in `node:sqlite`
@@ -33,43 +32,48 @@ arm64 dev machine.
 | `frontend` | The single-page dashboard UI (embedded HTML/CSS/JS, no build step, no external UI framework). |
 | `shared` | Internal helpers: Cube API token minting/fetch, Cube Store queries, schema file reads. |
 
-## Adding to an existing Cube deployment
+## Getting started
 
-The common case: you already run Cube API and Cube Store yourself. Add
-the `cubejs_cockpit` service from [docker-compose.yml](docker-compose.yml)
-to your existing docker-compose.yml, and add its three
-`QUERY_HISTORY_*`/`PERFORMANCE_*` ingest env vars to your real `cube_api`
-service (see **Integrating with Cube.js** below for exactly what those
-forward). `CUBEJS_API_SECRET` and `CUBEJS_PLAYGROUND_AUTH_SECRET` must
-match your deployment's own secrets exactly, and the dashboard's schema
-volume must point at the same `schema/` directory your `cube_api` loads
-from.
+Add a `cubejs_cockpit` service to your existing Cube.js docker-compose.yml,
+pointing at the public image:
 
-`cubejs_cockpit`'s image is pulled from `ghcr.io/guik/cubejs-cockpit:latest`,
-published automatically by this repo's own GitHub Actions on every push
-to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
+```yaml
+cubejs_cockpit:
+  image: ghcr.io/guik/cubejs-cockpit:latest
+  ports:
+    - "9080:8080"
+  environment:
+    - CUBE_API_INTERNAL_URL=http://cube_api:4000
+    - CUBESTORE_HOST=cubestore
+    - CUBEJS_API_SECRET=${CUBEJS_API_SECRET}
+    - CUBEJS_PLAYGROUND_AUTH_SECRET=${CUBEJS_PLAYGROUND_AUTH_SECRET}
+  volumes:
+    - ./schema:/app/schema:ro
+    - ./.dashboard-data:/app/data
+  depends_on:
+    - cube_api
+    - cubestore
+```
+
+See [docker-compose.yml](docker-compose.yml) in this repo for the full
+reference (including `cube_api`/`cubestore` for context and the exact
+env var list). Three things to get right:
+
+- `CUBEJS_API_SECRET` and `CUBEJS_PLAYGROUND_AUTH_SECRET` must match your
+  deployment's own secrets exactly.
+- The `./schema` volume must point at the same directory your `cube_api`
+  loads its schema from -- that's what lets the data-model view reflect
+  what's actually deployed, not a copy.
+- Add the three `QUERY_HISTORY_*`/`PERFORMANCE_*` ingest env vars to your
+  real `cube_api` service (see **Integrating with Cube.js** below for
+  exactly what those forward).
+
+The image is published automatically by this repo's own GitHub Actions on
+every push to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
 [.github/workflows/docker.yml](.github/workflows/docker.yml). No local
 build is required; see **Building your own image** below if you want one
-anyway.
-
-## Running the full stack
-
-Don't have a Cube deployment yet, or want this repo to own the whole
-thing? [docker-compose.yml](docker-compose.yml) runs Cube API, Cube
-Store, and this dashboard together as one stack, wired to share a single
-`.env` and the same schema volume.
-
-1. Put your own `cube.js` config and `schema/` directory next to
-   `docker-compose.yml` (not included here -- they're specific to your
-   data model; see Cube's own docs for what goes in them).
-2. `cp .env.example .env`, then fill in `CUBEJS_API_SECRET` and
-   `CUBEJS_PLAYGROUND_AUTH_SECRET`, plus whatever env vars your Cube
-   driver needs (DB credentials, etc.) -- `cube_api` reads the same file.
-3. `docker compose up -d`
-
-Cube API ends up on `localhost:4000`, the dashboard on
-`127.0.0.1:8091` (deliberately not `0.0.0.0` -- see
-[SECURITY.md](SECURITY.md)).
+anyway. Cube Store's port and this dashboard's port should both stay
+bound to a private address, not `0.0.0.0` -- see [SECURITY.md](SECURITY.md).
 
 ## Configuration
 
@@ -91,9 +95,7 @@ it reads plain `process.env` rather than Encore's secrets manager):
 
 ## Integrating with Cube.js
 
-Already wired for you if you're running [docker-compose.yml](docker-compose.yml)
-as-is -- this section is for a `cube.js` you're maintaining yourself
-(the **Adding to an existing Cube deployment** case above).
+The `cube.js` side of the **Getting started** wiring above, in detail.
 
 This dashboard is a passive receiver: nothing here talks back into Cube's
 request path. The Cube.js side needs a custom `logger` in its `cube.js`
@@ -141,7 +143,7 @@ model Cube Store's own unauthenticated MySQL port already relies on.
 ## Building your own image
 
 Most deployments don't need this -- pull `ghcr.io/guik/cubejs-cockpit:latest`
-as described in **Running the full stack** above. Build locally instead
+as described in **Getting started** above. Build locally instead
 if you're testing an unreleased change, working offline/air-gapped, or
 maintaining a fork:
 
