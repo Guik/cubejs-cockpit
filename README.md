@@ -38,6 +38,9 @@ cubejs_cockpit:
   image: ghcr.io/guik/cubejs-cockpit:latest
   ports:
     - "9080:8080"
+  networks:
+    default:
+      aliases: [cube_dashboard] # rename this service freely; keep the alias in sync instead
   environment:
     - CUBE_API_INTERNAL_URL=http://cube_api:4000
     - CUBESTORE_HOST=cubestore
@@ -108,21 +111,12 @@ add latency or failure risk to a real Cube query -- every forwarder on the
 Cube.js side should be a non-awaited `fetch()` with a short timeout, per
 the pattern already established there. That resilience cuts both ways,
 though: a forwarder that can't resolve the hostname fails exactly the same
-silent way as one that's merely offline, so renaming this service in your
-compose file (or swapping which container runs it) breaks event ingestion
-with no error anywhere -- the symptom is history that quietly stops
-growing, not a crash. If you expect to rename it again, give the service a
-stable [network
-alias](https://docs.docker.com/reference/compose-file/services/#aliases)
-matching whatever hostname the `*_INGEST_URL` vars already use, so the
-Cube-side config never has to change:
-
-```yaml
-cubejs_cockpit:
-  networks:
-    default:
-      aliases: [cube_dashboard] # keep resolving under the old name too
-```
+silent way as one that's merely offline, so renaming this service breaks
+event ingestion with no error anywhere -- the symptom is history that
+quietly stops growing, not a crash. The `networks.aliases` entry in the
+**Getting started** example above exists for exactly this: it keeps the
+old hostname resolving to whatever container plays this role now, so the
+Cube-side `*_INGEST_URL` vars never have to change when you rename it.
 
 ## Building your own image
 
