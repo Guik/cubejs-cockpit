@@ -11,7 +11,10 @@ It is a companion to a Cube.js deployment, not a Cube.js deployment itself.
 It talks to `cube_api` (REST/system API) and Cube Store (MySQL wire
 protocol) over the internal network of whatever stack deploys it, and
 receives a stream of query/cache/error events forwarded by that stack's
-`cube.js` custom `logger` (see **Integrating with Cube.js** below).
+`cube.js` custom `logger` (see **Integrating with Cube.js** below). This
+repo ships a [docker-compose.yml](docker-compose.yml) that runs Cube API,
+Cube Store, and this dashboard together as one stack, sharing a single
+`.env` and the same schema volume -- see **Running the full stack**.
 
 Built with [Encore.ts](https://encore.dev/docs/ts). No external database or
 cache dependency: history is persisted with Node's built-in `node:sqlite`
@@ -56,6 +59,42 @@ pre-aggregation views will error on load -- that's expected when running
 standalone; the query history and performance views work fine against
 data posted directly to their ingest endpoints (see **API** below).
 
+## Running the full stack
+
+[docker-compose.yml](docker-compose.yml) runs Cube API, Cube Store, and
+this dashboard together, wired to share one `.env` and the same schema
+volume -- the setup this project is actually meant to be run as.
+
+1. Put your own `cube.js` config and `schema/` directory next to
+   `docker-compose.yml` (not included here -- they're specific to your
+   data model; see Cube's own docs for what goes in them).
+2. `cp .env.example .env`, then fill in `CUBEJS_API_SECRET` and
+   `CUBEJS_PLAYGROUND_AUTH_SECRET`, plus whatever env vars your Cube
+   driver needs (DB credentials, etc.) -- `cube_api` reads the same file.
+3. `docker compose up -d`
+
+`cubejs_cockpit`'s image is pulled from `ghcr.io/guik/cubejs-cockpit`,
+published automatically by this repo's own GitHub Actions on every push
+to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
+[.github/workflows/docker.yml](.github/workflows/docker.yml). No local
+build is required; see **Building your own image** below if you want one
+anyway.
+
+Cube API ends up on `localhost:4000`, the dashboard on
+`127.0.0.1:8091` (deliberately not `0.0.0.0` -- see
+[SECURITY.md](SECURITY.md)).
+
+### Adding to an existing Cube deployment
+
+Already running your own Cube stack? You don't need the whole compose
+file -- just add the `cubejs_cockpit` service from it to your existing
+docker-compose.yml, and add its three `QUERY_HISTORY_*`/`PERFORMANCE_*`
+ingest env vars to your real `cube_api` service (see **Integrating with
+Cube.js** below for exactly what those forward). `CUBEJS_API_SECRET` and
+`CUBEJS_PLAYGROUND_AUTH_SECRET` must match your deployment's own secrets
+exactly, and the dashboard's schema volume must point at the same
+`schema/` directory your `cube_api` loads from.
+
 ## Configuration
 
 All configuration is environment variables (this app is deployed via
@@ -75,6 +114,10 @@ it reads plain `process.env` rather than Encore's secrets manager):
 | `QUERY_HISTORY_RETENTION_DAYS` | `30` | Row retention for both `queryhistory` and `performance`; pruned on each ingest. |
 
 ## Integrating with Cube.js
+
+Already wired for you if you're running [docker-compose.yml](docker-compose.yml)
+as-is -- this section is for a `cube.js` you're maintaining yourself
+(the **Adding to an existing Cube deployment** case above).
 
 This dashboard is a passive receiver: nothing here talks back into Cube's
 request path. The Cube.js side needs a custom `logger` in its `cube.js`
@@ -119,7 +162,12 @@ they're meant to sit behind the same private network boundary as the rest
 of the Cube stack (never exposed on a public interface), the same trust
 model Cube Store's own unauthenticated MySQL port already relies on.
 
-## Building for deployment
+## Building your own image
+
+Most deployments don't need this -- pull `ghcr.io/guik/cubejs-cockpit`
+as described in **Running the full stack** above. Build locally instead
+if you're testing an unreleased change, working offline/air-gapped, or
+maintaining a fork:
 
 ```bash
 ./scripts/build.sh                        # builds cubejs-cockpit:latest
@@ -128,11 +176,9 @@ model Cube Store's own unauthenticated MySQL port already relies on.
 
 Wraps `encore build docker`, cross-compiling for `linux/amd64` regardless
 of the build machine's architecture. Load the resulting image on the
-target host (`docker save | ssh host docker load`, or push to a registry)
-and bring it up via whatever docker-compose stack orchestrates it alongside
-`cube_api` and Cube Store -- see `docker-compose.example.yml` for the
-shape of that (the real compose file, and the `.env` it reads secrets
-from, belong to the Cube deployment repo, not here).
+target host (`docker save | ssh host docker load`, or push to a registry),
+then point `docker-compose.yml`'s `cubejs_cockpit.image` at it instead of
+the `ghcr.io` tag.
 
 There is no hand-written `Dockerfile`: Encore's own compiler is the build
 system for a TypeScript Encore app -- `encore build docker` compiles the
