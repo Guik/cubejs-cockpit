@@ -19,3 +19,13 @@ node_modules
 *.db-journal
 /data
 /.dashboard-data
+
+# Your own Cube deployment, if running the full stack via docker-compose.yml
+# (see the README's "Running the full stack" section) -- specific to your
+# data model, never meant to live in this repo.
+/cube.js
+/schema
+/.cubestore
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

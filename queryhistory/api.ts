@@ -31,7 +31,7 @@ async function readBody(req: Parameters<Parameters<typeof api.raw>[1]>[0]): Prom
 
 // Called only by cube.js's custom logger (see the plan) -- internal
 // docker-network trust boundary only, same as every other internal call
-// in this stack (cube_dashboard -> cube_api, cube_api -> cubestore).
+// in this stack (cubejs_cockpit -> cube_api, cube_api -> cubestore).
 export const ingest = api.raw(
   { expose: true, method: "POST", path: "/api/query-history/ingest" },
   async (req, resp) => {

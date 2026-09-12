@@ -1,20 +1,25 @@
-# Example stack showing how this dashboard fits alongside a Cube.js
-# deployment. Copy the `cube_dashboard` service (and the three
-# QUERY_HISTORY_*/PERFORMANCE_*_INGEST_URL env vars on your Cube services)
-# into your own deployment's docker-compose.yml -- this file is a
-# reference, not something meant to be run as-is against a real Cube
-# deployment's `cube_api`/`cubestore` services.
+# The full stack: Cube API + Cube Store + cubejs-cockpit, wired together so
+# the dashboard shares the same secrets and the same schema volume as Cube
+# itself -- no copy-pasting env vars between two separate compose files.
 #
-# Build the image first (from this repo): ./scripts/build.sh
-# Copy .env.example to .env next to your docker-compose.yml (compose loads
-# it automatically for the ${CUBEJS_API_SECRET}/${CUBEJS_PLAYGROUND_AUTH_SECRET}
-# substitutions below), then:              docker compose up -d cube_dashboard
+# Already have your own Cube deployment instead? You don't need this whole
+# file -- just add the `cubejs_cockpit` service below (and the three
+# QUERY_HISTORY_*/PERFORMANCE_*_INGEST_URL env vars) to your existing
+# `cube_api` service. See the README's "Adding to an existing Cube
+# deployment" section.
+#
+# To run this as a full stack:
+#   1. Put your own `cube.js` config and `schema/` directory next to this
+#      file (not included -- they're specific to your data model).
+#   2. cp .env.example .env, then fill in the two secrets (and whatever
+#      env vars your Cube driver needs -- cube_api reads the same .env).
+#   3. docker compose up -d
+#      cubejs_cockpit's image is pulled from ghcr.io, published by this
+#      repo's own GitHub Actions on every push to main/version tag -- no
+#      local build needed (see the README's "Building your own image" if
+#      you want one anyway).
 
 services:
-  # --- Your existing Cube.js deployment (shown for context; omit these two
-  # services if you already have them -- just copy the env vars below onto
-  # your real cube_api/cube_refresh_worker services). ---
-
   cube_api:
     image: cubejs/cube:v1.6.73
     ports:
@@ -27,9 +32,9 @@ services:
       # timeout -- see this repo's README ("Integrating with Cube.js") for
       # exactly which cube.js changes that requires. Internal docker
       # network hostname; never routed through any external network.
-      - QUERY_HISTORY_INGEST_URL=http://cube_dashboard:8080/api/query-history/ingest
-      - PERFORMANCE_INGEST_URL=http://cube_dashboard:8080/api/performance/compile-ingest
-      - PERFORMANCE_ERROR_INGEST_URL=http://cube_dashboard:8080/api/performance/error-ingest
+      - QUERY_HISTORY_INGEST_URL=http://cubejs_cockpit:8080/api/query-history/ingest
+      - PERFORMANCE_INGEST_URL=http://cubejs_cockpit:8080/api/performance/compile-ingest
+      - PERFORMANCE_ERROR_INGEST_URL=http://cubejs_cockpit:8080/api/performance/error-ingest
     volumes:
       - ./cube.js:/cube/conf/cube.js
       - ./schema:/cube/conf/schema
@@ -49,8 +54,8 @@ services:
 
   # --- The dashboard itself ---
 
-  cube_dashboard:
-    image: cubejs-cockpit:latest
+  cubejs_cockpit:
+    image: ghcr.io/guik/cubejs-cockpit:latest
     ports:
       # Serves pre-aggregation data gated only by CUBEJS_PLAYGROUND_AUTH_SECRET
       # (which bypasses your queryRewrite's row-level filtering) and the raw

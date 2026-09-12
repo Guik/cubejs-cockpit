@@ -27,4 +27,4 @@ command -v encore >/dev/null || {
 
 (cd "$DIR" && encore build docker "$TAG")
 
-echo "Built $TAG -- load it on the deployment host and run: docker compose up -d cube_dashboard"
+echo "Built $TAG -- load it on the deployment host and run: docker compose up -d cubejs_cockpit"
