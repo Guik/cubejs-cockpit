@@ -6,7 +6,9 @@
 # deployment's `cube_api`/`cubestore` services.
 #
 # Build the image first (from this repo): ./scripts/build.sh
-# Then:                                    docker compose up -d cube_dashboard
+# Copy .env.example to .env next to your docker-compose.yml (compose loads
+# it automatically for the ${CUBEJS_API_SECRET}/${CUBEJS_PLAYGROUND_AUTH_SECRET}
+# substitutions below), then:              docker compose up -d cube_dashboard
 
 services:
   # --- Your existing Cube.js deployment (shown for context; omit these two
