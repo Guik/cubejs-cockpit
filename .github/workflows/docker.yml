@@ -2,13 +2,11 @@ name: Docker image
 
 # Builds the image with `encore build docker` (see scripts/build.sh and the
 # README's "Building for deployment" section for why there's no Dockerfile).
-# PRs only build, to make sure nothing broke -- nothing is pushed until it
-# lands on main or a version tag, and forked-repo PRs never see registry
-# credentials.
+# PRs only build, to make sure nothing broke -- nothing is pushed except on a
+# version tag, and forked-repo PRs never see registry credentials.
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   pull_request:
     branches: [main]
@@ -58,20 +56,16 @@ jobs:
         run: |
           set -euo pipefail
           image="${{ steps.image.outputs.name }}"
+          version="${GITHUB_REF#refs/tags/}"
 
           docker tag "$image:ci" "$image:sha-${GITHUB_SHA::12}"
           docker push "$image:sha-${GITHUB_SHA::12}"
 
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="${GITHUB_REF#refs/tags/}"
-            docker tag "$image:ci" "$image:$version"
-            docker push "$image:$version"
-          fi
+          docker tag "$image:ci" "$image:$version"
+          docker push "$image:$version"
 
-          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            docker tag "$image:ci" "$image:latest"
-            docker push "$image:latest"
-          fi
+          docker tag "$image:ci" "$image:latest"
+          docker push "$image:latest"
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
