@@ -14,10 +14,10 @@
 #   2. cp .env.example .env, then fill in the two secrets (and whatever
 #      env vars your Cube driver needs -- cube_api reads the same .env).
 #   3. docker compose up -d
-#      cubejs_cockpit's image is pulled from ghcr.io, published by this
-#      repo's own GitHub Actions on every push to main/version tag -- no
-#      local build needed (see the README's "Building your own image" if
-#      you want one anyway).
+#      cubejs_cockpit's image (ghcr.io/guik/cubejs-cockpit:latest) is
+#      published by this repo's own GitHub Actions on every push to
+#      main/version tag -- no local build needed (see the README's
+#      "Building your own image" if you want one anyway).
 
 services:
   cube_api:

@@ -45,7 +45,7 @@ match your deployment's own secrets exactly, and the dashboard's schema
 volume must point at the same `schema/` directory your `cube_api` loads
 from.
 
-`cubejs_cockpit`'s image is pulled from `ghcr.io/guik/cubejs-cockpit`,
+`cubejs_cockpit`'s image is pulled from `ghcr.io/guik/cubejs-cockpit:latest`,
 published automatically by this repo's own GitHub Actions on every push
 to `main` (`:latest`) and version tag (`:vX.Y.Z`) -- see
 [.github/workflows/docker.yml](.github/workflows/docker.yml). No local
@@ -140,7 +140,7 @@ model Cube Store's own unauthenticated MySQL port already relies on.
 
 ## Building your own image
 
-Most deployments don't need this -- pull `ghcr.io/guik/cubejs-cockpit`
+Most deployments don't need this -- pull `ghcr.io/guik/cubejs-cockpit:latest`
 as described in **Running the full stack** above. Build locally instead
 if you're testing an unreleased change, working offline/air-gapped, or
 maintaining a fork:
