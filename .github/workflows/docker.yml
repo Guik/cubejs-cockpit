@@ -40,6 +40,20 @@ jobs:
         id: image
         run: echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
 
+      # Bakes the tag being built into the image itself (frontend/indexHtml.ts
+      # displays shared/version.ts's APP_VERSION) -- so the running dashboard
+      # can always show which version it actually is, with nothing for a
+      # deployer to configure or keep in sync. PR builds never get pushed
+      # anywhere, so a dev-<sha> placeholder is fine for them.
+      - name: Resolve app version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+          else
+            version="dev-${GITHUB_SHA::12}"
+          fi
+          sed -i "s/APP_VERSION = \".*\"/APP_VERSION = \"$version\"/" shared/version.ts
+
       - name: Build image
         run: encore build docker "${{ steps.image.outputs.name }}:ci"
 

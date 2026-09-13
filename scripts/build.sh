@@ -25,6 +25,16 @@ command -v encore >/dev/null || {
   exit 1
 }
 
+# Bakes a version string into the image the same way CI does (see
+# shared/version.ts and docker.yml's "Resolve app version" step), so a
+# locally-built image is self-describing too. Restored on exit -- this is
+# a build-time patch, not something meant to show up as a real diff.
+VERSION_FILE="$DIR/shared/version.ts"
+VERSION="$(git -C "$DIR" describe --tags --always --dirty 2>/dev/null || echo dev)"
+trap 'git -C "$DIR" checkout -- "$VERSION_FILE" 2>/dev/null || true' EXIT
+sed -i.bak "s/APP_VERSION = \".*\"/APP_VERSION = \"$VERSION\"/" "$VERSION_FILE"
+rm -f "$VERSION_FILE.bak"
+
 (cd "$DIR" && encore build docker "$TAG")
 
 echo "Built $TAG -- load it on the deployment host and run: docker compose up -d cubejs_cockpit"

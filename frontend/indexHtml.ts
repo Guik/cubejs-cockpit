@@ -1,3 +1,5 @@
+import { APP_VERSION } from "../shared/version";
+
 // Embedded as a TS string constant, not read from disk at runtime:
 // Encore's build step only bundles compiled TS output, it doesn't copy
 // arbitrary static files (public/index.html isn't present in
@@ -145,7 +147,7 @@ export const INDEX_HTML = `<!doctype html>
 </head>
 <body>
 <header>
-  <h1>cubejs-cockpit &middot; self-hosted</h1>
+  <h1>cubejs-cockpit <span class="pill" title="Image version">${APP_VERSION}</span> &middot; self-hosted</h1>
   <nav>
     <button data-tab="model" class="active">Data model</button>
     <button data-tab="preaggs">Pre-aggregations</button>
