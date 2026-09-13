@@ -63,6 +63,11 @@ export const INDEX_HTML = `<!doctype html>
   .pill.source-scan { background: #3a2313; color: #fdba74; }
   .pill.source-unknown { background: #1a1d22; color: #6b7280; }
   .pill.cache-stale { background: #3a3313; color: #fde68a; margin-left: 4px; }
+  .pill.cachetype-in-memory { background: #163a2e; color: #86efac; }
+  .pill.cachetype-cube-store-cache { background: #1e2a3a; color: #93c5fd; }
+  .pill.cachetype-pre-aggregation { background: #2a1e3a; color: #c4b5fd; }
+  .pill.cachetype-source { background: #3a2313; color: #fdba74; }
+  .pill.cachetype-unknown { background: #1a1d22; color: #6b7280; }
   .pill.kind-auth { background: #3a1e2e; color: #f9a8d4; }
   .pill.kind-preagg-build { background: #3a2313; color: #fdba74; }
   .pill.kind-compile { background: #2a1e3a; color: #c4b5fd; }
@@ -1269,6 +1274,16 @@ function sourcePill(row) {
   return pills;
 }
 
+// cacheType is the finer-grained signal behind the Source pill above: which
+// tier actually served the response, not just whether a rollup existed --
+// see the long comment on takeCacheTier in dashboard/queryhistory/db.ts.
+// Reuses CACHE_TYPE_LABELS, the same map the aggregate chart above legends
+// with, so the per-query label always matches the chart's wording.
+function cachePill(row) {
+  const cls = 'cachetype-' + (row.cacheType || 'unknown');
+  return el('span', { class: 'pill ' + cls }, [CACHE_TYPE_LABELS[row.cacheType] || 'unknown']);
+}
+
 function statTile(label, valueNode) {
   return el('div', { class: 'stat-tile' }, [
     el('div', { class: 'stat-label' }, [label]),
@@ -1295,11 +1310,12 @@ function openQueryOverlay(row) {
   body.innerHTML = '';
 
   // --- Key metrics, up top and prominent (not buried in the field list
-  // below) -- the four things you'd actually glance at first. ---
+  // below) -- the things you'd actually glance at first. ---
   body.append(el('div', { class: 'stat-tiles' }, [
     statTile('Status', el('span', { class: 'pill status-' + row.status }, [row.status])),
     statTile('Duration', fmtMs(row.durationMs)),
     statTile('Source', sourcePill(row)),
+    statTile('Cache', cachePill(row)),
     statTile('Started at', fmtDate(row.startedAt)),
   ]));
 

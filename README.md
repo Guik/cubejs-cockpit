@@ -233,7 +233,6 @@ it reads plain `process.env` rather than Encore's secrets manager):
 | GET | `/api/pre-aggregations/build-history` | Rebuild timeline from Cube Store. |
 | POST | `/api/query-history/ingest` | Receives one query-lifecycle event from Cube.js. |
 | GET | `/api/query-history` | Filterable/paginated query list. |
-| GET | `/api/query-history/detail` | Full stored detail for one query. |
 | GET | `/api/query-history/stats` | Time-bucketed count/duration/error-count. |
 | GET | `/api/query-history/cache-stats` | Time-bucketed count/duration by cache type. |
 | GET | `/api/query-history/api-type-stats` | Time-bucketed count by API type. |

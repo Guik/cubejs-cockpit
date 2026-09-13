@@ -2,7 +2,6 @@ import { api } from "encore.dev/api";
 import {
   insertEvent,
   listEvents,
-  getEventById,
   statsBuckets,
   cacheStatsBuckets,
   apiTypeStatsBuckets,
@@ -15,8 +14,8 @@ import {
 // than fighting Encore's typed-schema analyzer (which rejects `unknown`
 // and index-signature types) for data whose shape is either pass-through
 // (ingest, sourced from cube.js's logger) or fully within our own
-// control anyway (list/stats/detail already return concrete row types
-// from db.ts).
+// control anyway (list/stats already return concrete row types from
+// db.ts).
 
 function sendJson(resp: Parameters<Parameters<typeof api.raw>[1]>[1], status: number, body: unknown) {
   resp.writeHead(status, { "Content-Type": "application/json" });
@@ -94,23 +93,5 @@ export const staleCacheStats = api.raw(
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
     sendJson(resp, 200, { buckets: staleCacheStatsBuckets(sinceMinutes) });
-  }
-);
-
-export const detail = api.raw(
-  { expose: true, method: "GET", path: "/api/query-history/detail" },
-  async (req, resp) => {
-    const url = new URL(req.url || "", "http://internal");
-    const id = Number(url.searchParams.get("id"));
-    if (!id) {
-      sendJson(resp, 400, { error: "missing or invalid 'id'" });
-      return;
-    }
-    const row = getEventById(id);
-    if (!row) {
-      sendJson(resp, 404, { error: "not found" });
-      return;
-    }
-    sendJson(resp, 200, row);
   }
 );

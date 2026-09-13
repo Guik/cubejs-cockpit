@@ -332,13 +332,6 @@ export function listEvents(params: ListParams): { rows: QueryEventRow[]; total: 
   return { rows, total: totalRow.c };
 }
 
-export function getEventById(id: number): QueryEventRow | undefined {
-  const database = getDb();
-  return database
-    .prepare(`SELECT ${SELECT_COLUMNS} FROM query_events WHERE id = ?`)
-    .get(id) as unknown as QueryEventRow | undefined;
-}
-
 export interface StatsBucket {
   bucket: string;
   count: number;
