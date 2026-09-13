@@ -12,7 +12,9 @@ Self-hosted operations dashboard for a Cube.js / Cube Core deployment.
 - **Persistent query history** -- every query with duration, status,
   cache type, and pre-aggregation attribution.
 - **Performance view** -- cache-type breakdown, data model compilation
-  wait time, request mix by API type, and an auth/build errors feed.
+  wait time, and request mix by API type.
+- **Errors view** -- auth failures and pre-aggregation build errors over
+  time, plus the actual message/context behind each recent one.
 
 It is a companion to a Cube.js deployment, not a Cube.js deployment itself.
 It talks to `cube_api` (REST/system API) and Cube Store (MySQL wire

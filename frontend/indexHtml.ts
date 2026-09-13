@@ -172,6 +172,7 @@ export const INDEX_HTML = `<!doctype html>
     <button data-tab="preaggs">Pre-aggregations</button>
     <button data-tab="queries">Query history</button>
     <button data-tab="performance">Performance</button>
+    <button data-tab="errors">Errors</button>
   </nav>
 </header>
 <main>
@@ -215,9 +216,13 @@ export const INDEX_HTML = `<!doctype html>
     <div id="perf-mix-charts-host" class="loading">Loading&hellip;</div>
     <h2>Data model compilation</h2>
     <div id="perf-compile-charts-host" class="loading">Loading&hellip;</div>
-    <h2>Errors</h2>
-    <div id="perf-errors-host" class="loading">Loading&hellip;</div>
-    <div id="perf-errors-list-host" class="loading">Loading&hellip;</div>
+  </section>
+  <section id="errors">
+    <div id="errors-timerange-host"></div>
+    <h2>Auth failures &amp; pre-aggregation build errors</h2>
+    <div id="errors-chart-host" class="loading">Loading&hellip;</div>
+    <h2>Recent errors</h2>
+    <div id="errors-list-host" class="loading">Loading&hellip;</div>
   </section>
 </main>
 
@@ -1135,11 +1140,11 @@ function currentRangeLabel() {
   return match ? match.label : (queryTimeRangeMinutes + 'm');
 }
 
-// Shared across tabs (query history + performance both key off the same
-// queryTimeRangeMinutes): each renders its own bar into its own host, but a
-// click on either re-renders both bars and re-fires every registered
-// loader, rather than each tab keeping an independent range.
-const TIME_RANGE_BAR_HOSTS = ['query-timerange-host', 'perf-timerange-host'];
+// Shared across tabs (query history, performance, and errors all key off
+// the same queryTimeRangeMinutes): each renders its own bar into its own
+// host, but a click on any of them re-renders every bar and re-fires every
+// registered loader, rather than each tab keeping an independent range.
+const TIME_RANGE_BAR_HOSTS = ['query-timerange-host', 'perf-timerange-host', 'errors-timerange-host'];
 const TIME_RANGE_LISTENERS = [];
 
 function onTimeRangeChange(fn) {
@@ -1284,15 +1289,16 @@ async function loadPerformanceMixCharts() {
   }
 }
 
-// --- Errors: auth failures + pre-aggregation build job errors ---
+// --- Errors tab: auth failures + pre-aggregation build job errors ---
 //
-// Structurally distinct from the query_events-backed charts above: neither
-// event is tied to a completed, duration-bearing request (an auth failure
-// happens before a security context exists at all; a build job error comes
-// from a background refresh-worker job, not a live HTTP request) -- but
-// charted the same bucketed-count way as everything else on this tab. See
-// cube.js for why auth failures can't be matched by a fixed message
-// string, and why the raw bearer token is never forwarded here.
+// Structurally distinct from the query_events-backed charts on the
+// Performance tab: neither event is tied to a completed, duration-bearing
+// request (an auth failure happens before a security context exists at
+// all; a build job error comes from a background refresh-worker job, not
+// a live HTTP request) -- but charted the same bucketed-count way as
+// everything else in this app. See cube.js for why auth failures can't be
+// matched by a fixed message string, and why the raw bearer token is
+// never forwarded here.
 
 const ERROR_KIND_ORDER = ['auth', 'preagg-build'];
 const ERROR_KIND_LABELS = { 'auth': 'Auth failures', 'preagg-build': 'Pre-agg build errors' };
@@ -1308,7 +1314,7 @@ function pivotErrorBuckets(rows) {
 }
 
 async function loadErrorCharts() {
-  const host = document.getElementById('perf-errors-host');
+  const host = document.getElementById('errors-chart-host');
   try {
     const data = await getJSON('/api/performance/error-stats?sinceMinutes=' + queryTimeRangeMinutes);
     const buckets = pivotErrorBuckets(data.buckets || []);
@@ -1329,7 +1335,7 @@ async function loadErrorCharts() {
 const ERROR_KIND_LABELS_FULL = { 'auth': 'Auth failure', 'preagg-build': 'Pre-agg build error', 'compile': 'Compile error' };
 
 function renderErrorsList(rows) {
-  const host = document.getElementById('perf-errors-list-host');
+  const host = document.getElementById('errors-list-host');
   host.innerHTML = '';
   if (!rows.length) {
     host.append(el('div', { class: 'muted' }, ['No errors in this range.']));
@@ -1357,7 +1363,7 @@ function renderErrorsList(rows) {
 }
 
 async function loadRecentErrors() {
-  const host = document.getElementById('perf-errors-list-host');
+  const host = document.getElementById('errors-list-host');
   try {
     const data = await getJSON('/api/performance/recent-errors?sinceMinutes=' + queryTimeRangeMinutes);
     renderErrorsList(data.errors || []);
