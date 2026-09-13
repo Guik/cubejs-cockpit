@@ -37,10 +37,16 @@ export const INDEX_HTML = `<!doctype html>
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c1f24; vertical-align: top; }
   th { color: #6b7280; font-weight: 500; }
-  .filterable-th { position: relative; }
-  .col-filter-btn { background: none; border: none; color: #6b7280; cursor: pointer; font-size: 9px; padding: 2px 0 2px 4px; vertical-align: middle; }
-  .col-filter-btn:hover { color: #9aa4b2; }
-  .col-filter-btn.active { color: #4ade80; }
+  .filterable-th { position: relative; padding-right: 26px; }
+  .col-filter-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    position: absolute; top: 50%; right: 4px; transform: translateY(-50%);
+    width: 18px; height: 18px; background: #1a1d22; border: 1px solid #2c3038; color: #9aa4b2;
+    cursor: pointer; border-radius: 5px; padding: 0;
+  }
+  .col-filter-btn svg { display: block; width: 11px; height: 11px; }
+  .col-filter-btn:hover { border-color: #3b4252; color: #fff; }
+  .col-filter-btn.active { background: #123a20; border-color: #4ade80; color: #4ade80; }
   .col-filter-popover { position: absolute; top: 100%; left: 0; z-index: 50; background: #111318; border: 1px solid #23262b; border-radius: 8px; padding: 8px; min-width: 200px; max-width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); font-weight: 400; text-transform: none; letter-spacing: normal; white-space: normal; }
   .col-filter-search { width: 100%; box-sizing: border-box; margin-bottom: 6px; background: #0b0d10; border: 1px solid #23262b; color: #e6e6e6; border-radius: 6px; padding: 4px 8px; font-size: 12px; font-family: inherit; }
   .col-filter-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
@@ -121,10 +127,11 @@ export const INDEX_HTML = `<!doctype html>
   .gen-list li { padding: 5px 0; border-bottom: 1px solid #1c1f24; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; display: flex; justify-content: space-between; gap: 12px; }
   .gen-list li:last-child { border-bottom: none; }
 
-  /* Sortable partitions table */
-  #preagg-table th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
-  #preagg-table th[data-sort]:hover { color: #cbd5e1; }
-  #preagg-table th .arrow { display: inline-block; width: 10px; opacity: 0.6; }
+  /* Sortable headers -- shared by every array view (pre-aggregations,
+     query history, build history), not just the partitions table. */
+  th.sortable-th { cursor: pointer; user-select: none; white-space: nowrap; }
+  th.sortable-th:hover { color: #cbd5e1; }
+  th.sortable-th .arrow { display: inline-block; width: 10px; opacity: 0.6; }
   #preagg-table tbody tr { cursor: pointer; }
   #preagg-table tbody tr:hover { background: #14171c; }
   #preagg-table td.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
@@ -359,14 +366,21 @@ function renderColumnFilterSummary(hostId, columnFilters, onClear) {
 // build the rest of the <th> (label, sort click handler, ...) themselves;
 // this only ever adds to it, so it composes with a sortable header (the
 // pre-aggregations table) or a plain one (query history) the same way.
+// Funnel icon (fill: currentColor, so .col-filter-btn's own color -- grey
+// normally, green once active -- carries through without a second set of
+// color rules to keep in sync).
+const FILTER_ICON_SVG = '<svg viewBox="0 0 16 16" fill="currentColor"><polygon points="2,3 14,3 9.5,8.5 9.5,13 6.5,13 6.5,8.5"/></svg>';
+
 function appendColumnFilterUI(th, col, allRows, columns, columnFilters, ui, onChange) {
   columnFilterRegistry.set(ui, onChange);
   th.classList.add('filterable-th');
   const selected = columnFilters[col.key];
 
   const btn = el('button', {
-    type: 'button', class: 'col-filter-btn' + (selected.size ? ' active' : ''), title: 'Filter',
-  }, ['\\u25be']);
+    type: 'button', class: 'col-filter-btn' + (selected.size ? ' active' : ''),
+    title: selected.size ? ('Filtered (' + selected.size + ' selected)') : 'Filter',
+  }, []);
+  btn.innerHTML = FILTER_ICON_SVG;
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     ui.openKey = ui.openKey === col.key ? null : col.key;
@@ -424,6 +438,41 @@ function appendColumnFilterUI(th, col, allRows, columns, columnFilters, ui, onCh
     searchInput.focus();
     searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
   }
+}
+
+// --- Sortable headers, shared by the same three array views ---
+//
+// One arrow indicator, one click target (the whole header), the same
+// asc/desc toggle behavior everywhere: click a column to sort by it
+// (a column's own "defaultDir" -- 'desc' for date-like columns where
+// "most recent" is the useful first click, 'asc' otherwise -- decides
+// which direction a first click on it lands in); click the same column
+// again to reverse. "sortState" is mutated in place (never reassigned)
+// so this can take any table's own { key, dir } object by reference.
+
+function renderSortableHeaderCell(col, sortState, onChange) {
+  const arrow = sortState.key === col.key ? (sortState.dir === 'asc' ? '\\u2191' : '\\u2193') : '';
+  const th = el('th', { class: 'sortable-th' }, [col.label, ' ', el('span', { class: 'arrow' }, [arrow])]);
+  th.addEventListener('click', () => {
+    if (sortState.key === col.key) {
+      sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortState.key = col.key;
+      sortState.dir = col.defaultDir || 'asc';
+    }
+    onChange();
+  });
+  return th;
+}
+
+function sortRows(rows, columns, sortState) {
+  const col = columns.find(c => c.key === sortState.key);
+  if (!col || !col.sort) return rows;
+  return rows.slice().sort((a, b) => {
+    const av = col.sort(a), bv = col.sort(b);
+    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+    return sortState.dir === 'asc' ? cmp : -cmp;
+  });
 }
 
 // --- Data model tab ---
@@ -618,16 +667,16 @@ function matchesFilter(preAggId, tableName, state) {
 const COLUMNS = [
   { key: 'preAggId', label: 'Pre-aggregation', sort: (r) => r.preAggId, filterValue: (r) => r.preAggId },
   { key: 'tableName', label: 'Table name', sort: (r) => r.partition.tableName || '', filterValue: (r) => r.partition.tableName || '(none)' },
-  { key: 'buildRangeStart', label: 'Build range', sort: (r) => r.partition.buildRangeStart || '' },
-  { key: 'sealAt', label: 'Seal at', sort: (r) => r.partition.sealAt || '' },
+  { key: 'buildRangeStart', label: 'Build range', sort: (r) => r.partition.buildRangeStart || '', defaultDir: 'desc' },
+  { key: 'sealAt', label: 'Seal at', sort: (r) => r.partition.sealAt || '', defaultDir: 'desc' },
   {
-    key: 'lastUpdated', label: 'Last updated', sort: (r) => lastUpdated(r.partition) || 0,
+    key: 'lastUpdated', label: 'Last updated', sort: (r) => lastUpdated(r.partition) || 0, defaultDir: 'desc',
     filterValue: (r) => ((r.partition.versionEntries || []).length > 0 ? 'built' : 'empty'),
     formatValue: (v) => (v === 'built' ? 'built' : 'no data'),
   },
 ];
 
-let sortState = { key: 'lastUpdated', dir: 'desc' };
+let preaggSortState = { key: 'lastUpdated', dir: 'desc' };
 let preaggColumnFilters = { preAggId: new Set(), tableName: new Set(), lastUpdated: new Set() };
 let preaggFilterUi = { openKey: null, search: '' };
 let preaggAllRows = [];
@@ -644,24 +693,10 @@ function renderPreaggTable() {
     return;
   }
 
-  const sorted = rows.slice().sort((a, b) => {
-    const col = COLUMNS.find(c => c.key === sortState.key);
-    const av = col.sort(a), bv = col.sort(b);
-    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
-    return sortState.dir === 'asc' ? cmp : -cmp;
-  });
+  const sorted = sortRows(rows, COLUMNS, preaggSortState);
 
   const thead = el('tr', null, COLUMNS.map(col => {
-    const arrow = sortState.key === col.key ? (sortState.dir === 'asc' ? '\\u2191' : '\\u2193') : '';
-    const th = el('th', { 'data-sort': col.key }, [col.label, ' ', el('span', { class: 'arrow' }, [arrow])]);
-    th.addEventListener('click', () => {
-      if (sortState.key === col.key) {
-        sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
-      } else {
-        sortState = { key: col.key, dir: col.key === 'lastUpdated' ? 'desc' : 'asc' };
-      }
-      renderPreaggTable();
-    });
+    const th = renderSortableHeaderCell(col, preaggSortState, renderPreaggTable);
     if (col.filterValue) appendColumnFilterUI(th, col, preaggAllRows, COLUMNS, preaggColumnFilters, preaggFilterUi, renderPreaggTable);
     return th;
   }));
@@ -735,7 +770,22 @@ function openGenerationsOverlay(preAggId, group) {
   backdrop.hidden = false;
 }
 
+// Sortable the same way as the other two array views (see
+// renderSortableHeaderCell/sortRows) -- no header filters here, since
+// preAggId/table-name filtering already exists as the top filter bar above
+// (shared with the partitions tab via renderFilterBar/matchesFilter).
+const HISTORY_COLUMNS = [
+  { key: 'preAggId', label: 'Pre-aggregation', sort: (r) => r.preAggId },
+  { key: 'logicalName', label: 'Partition', sort: (r) => r.group.logicalName || '' },
+  { key: 'generations', label: 'Generations', sort: (r) => r.group.generations.length },
+  {
+    key: 'mostRecentBuild', label: 'Most recent build', defaultDir: 'desc',
+    sort: (r) => (r.group.generations[0] ? r.group.generations[0].createdAt : ''),
+  },
+];
+
 let historyFilterState = { preAggId: '', search: '' };
+let historySortState = { key: 'mostRecentBuild', dir: 'desc' };
 let historyAllGroups = []; // [{ preAggId, group }]
 
 function renderHistoryList() {
@@ -749,18 +799,9 @@ function renderHistoryList() {
     return;
   }
 
-  const sorted = rows.slice().sort((a, b) => {
-    const at = a.group.generations[0] ? a.group.generations[0].createdAt : '';
-    const bt = b.group.generations[0] ? b.group.generations[0].createdAt : '';
-    return bt < at ? -1 : bt > at ? 1 : 0; // most recent build first
-  });
+  const sorted = sortRows(rows, HISTORY_COLUMNS, historySortState);
 
-  const thead = el('tr', null, [
-    el('th', null, ['Pre-aggregation']),
-    el('th', null, ['Partition']),
-    el('th', null, ['Generations']),
-    el('th', null, ['Most recent build']),
-  ]);
+  const thead = el('tr', null, HISTORY_COLUMNS.map(col => renderSortableHeaderCell(col, historySortState, renderHistoryList)));
 
   const tbody = sorted.map(row => {
     const latest = row.group.generations[0];
@@ -1506,14 +1547,18 @@ function openQueryOverlay(row) {
 // list, and Query preview is free text the search box above already covers
 // server-side.
 const QUERY_COLUMNS = [
-  { key: 'status', label: 'Status', filterValue: (r) => r.status },
-  { key: 'startedAt', label: 'Started at' },
-  { key: 'durationMs', label: 'Duration' },
-  { key: 'source', label: 'Source', filterValue: (r) => sourceKey(r), formatValue: (v) => SOURCE_LABELS[v] },
-  { key: 'apiType', label: 'API type', filterValue: (r) => r.apiType || '(none)' },
-  { key: 'queryJson', label: 'Query preview' },
+  { key: 'status', label: 'Status', filterValue: (r) => r.status, sort: (r) => r.status },
+  { key: 'startedAt', label: 'Started at', sort: (r) => r.startedAt || '', defaultDir: 'desc' },
+  { key: 'durationMs', label: 'Duration', sort: (r) => r.durationMs || 0, defaultDir: 'desc' },
+  { key: 'source', label: 'Source', filterValue: (r) => sourceKey(r), formatValue: (v) => SOURCE_LABELS[v], sort: (r) => sourceKey(r) },
+  { key: 'apiType', label: 'API type', filterValue: (r) => r.apiType || '(none)', sort: (r) => r.apiType || '' },
+  { key: 'queryJson', label: 'Query preview', sort: (r) => r.queryJson || '' },
 ];
 
+// Default sort matches what the server already returns rows in
+// (completed_at DESC) -- so with no explicit sort applied, the table looks
+// exactly like it always has.
+let querySortState = { key: 'startedAt', dir: 'desc' };
 let queryColumnFilters = { status: new Set(), source: new Set(), apiType: new Set() };
 let queryFilterUi = { openKey: null, search: '' };
 let queryAllRows = [];
@@ -1532,14 +1577,15 @@ function renderQueryTableFiltered() {
     host.append(el('div', { class: 'muted' }, ['No queries recorded yet.']));
     return;
   }
-  const rows = queryAllRows.filter(r => rowMatchesColumnFilters(r, QUERY_COLUMNS, queryColumnFilters));
-  if (!rows.length) {
+  const filtered = queryAllRows.filter(r => rowMatchesColumnFilters(r, QUERY_COLUMNS, queryColumnFilters));
+  if (!filtered.length) {
     host.append(el('div', { class: 'muted' }, ['No queries match the current filters.']));
     return;
   }
+  const rows = sortRows(filtered, QUERY_COLUMNS, querySortState);
 
   const thead = el('tr', null, QUERY_COLUMNS.map(col => {
-    const th = el('th', null, [col.label]);
+    const th = renderSortableHeaderCell(col, querySortState, renderQueryTableFiltered);
     if (col.filterValue) appendColumnFilterUI(th, col, queryAllRows, QUERY_COLUMNS, queryColumnFilters, queryFilterUi, renderQueryTableFiltered);
     return th;
   }));
