@@ -295,17 +295,39 @@ const SELECT_COLUMNS = `
   cache_type as cacheType
 `;
 
+// Cube's own internal refreshKey-check/pre-aggregation-orchestration
+// activity lands in query_events indistinguishable from real end-user
+// traffic at a glance -- but it's reliably identifiable: request_id is
+// always prefixed 'scheduler-' (confirmed against real production data;
+// see tmp/cube-data-samples), organisationId/userId/apiType are always
+// null, and duration_ms is a near-constant ~5000ms -- the internal
+// polling interval 'Continue wait' reports, not a real query latency.
+// Left mixed in, it silently drags every duration/count aggregate toward
+// that constant whenever a scheduled refresh happens to land in a bucket.
+//
+// Treated as a separate "project" from real user traffic throughout this
+// module: 'user' (the default everywhere below) excludes it, 'internal'
+// isolates it, 'all' keeps the old unfiltered behavior.
+export type QueryOrigin = "user" | "internal" | "all";
+
+function originClause(origin: QueryOrigin | undefined): string {
+  if (origin === "internal") return "request_id LIKE 'scheduler-%'";
+  if (origin === "all") return "1=1";
+  return "(request_id IS NULL OR request_id NOT LIKE 'scheduler-%')";
+}
+
 export interface ListParams {
   status?: string;
   search?: string;
   sinceMinutes?: number;
   limit?: number;
   offset?: number;
+  origin?: QueryOrigin;
 }
 
 export function listEvents(params: ListParams): { rows: QueryEventRow[]; total: number } {
   const database = getDb();
-  const clauses: string[] = [];
+  const clauses: string[] = [originClause(params.origin)];
   const args: SQLInputValue[] = [];
   if (params.status) {
     clauses.push("status = ?");
@@ -353,7 +375,7 @@ function bucketSecondsFor(sinceMinutes: number): number {
   return 24 * 60 * 60; // 1 day
 }
 
-export function statsBuckets(sinceMinutes: number): StatsBucket[] {
+export function statsBuckets(sinceMinutes: number, origin?: QueryOrigin): StatsBucket[] {
   const database = getDb();
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
   const bucketSeconds = bucketSecondsFor(sinceMinutes);
@@ -375,7 +397,7 @@ export function statsBuckets(sinceMinutes: number): StatsBucket[] {
          AVG(duration_ms) as avgDurationMs,
          SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount
        FROM query_events
-       WHERE completed_at >= ?
+       WHERE completed_at >= ? AND ${originClause(origin)}
        GROUP BY bucket
        ORDER BY bucket ASC`
     )
@@ -395,7 +417,7 @@ export interface CacheStatsBucket {
 // than lumped into a synthetic "unknown" series: they were never actually
 // classified into any of the four real tiers, so charting them as a tier
 // would misrepresent what's genuinely known.
-export function cacheStatsBuckets(sinceMinutes: number): CacheStatsBucket[] {
+export function cacheStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): CacheStatsBucket[] {
   const database = getDb();
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
   const bucketSeconds = bucketSecondsFor(sinceMinutes);
@@ -407,7 +429,7 @@ export function cacheStatsBuckets(sinceMinutes: number): CacheStatsBucket[] {
          COUNT(*) as count,
          AVG(duration_ms) as avgDurationMs
        FROM query_events
-       WHERE completed_at >= ? AND cache_type IS NOT NULL
+       WHERE completed_at >= ? AND cache_type IS NOT NULL AND ${originClause(origin)}
        GROUP BY bucket, cacheType
        ORDER BY bucket ASC`
     )
@@ -424,7 +446,7 @@ export interface ApiTypeStatsBucket {
 // api_type (rest/sql/graphql/... -- whatever this Cube instance actually
 // serves) instead. Excludes NULL api_type the same way and for the same
 // reason as cache_type above.
-export function apiTypeStatsBuckets(sinceMinutes: number): ApiTypeStatsBucket[] {
+export function apiTypeStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): ApiTypeStatsBucket[] {
   const database = getDb();
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
   const bucketSeconds = bucketSecondsFor(sinceMinutes);
@@ -435,7 +457,7 @@ export function apiTypeStatsBuckets(sinceMinutes: number): ApiTypeStatsBucket[] 
          api_type as apiType,
          COUNT(*) as count
        FROM query_events
-       WHERE completed_at >= ? AND api_type IS NOT NULL
+       WHERE completed_at >= ? AND api_type IS NOT NULL AND ${originClause(origin)}
        GROUP BY bucket, apiType
        ORDER BY bucket ASC`
     )
@@ -453,7 +475,7 @@ export interface StaleCacheStatsBucket {
 // window (not just successes) so the rate reflects "how often did Cube
 // serve stale data" against the full traffic it saw, not a cherry-picked
 // denominator.
-export function staleCacheStatsBuckets(sinceMinutes: number): StaleCacheStatsBucket[] {
+export function staleCacheStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): StaleCacheStatsBucket[] {
   const database = getDb();
   const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
   const bucketSeconds = bucketSecondsFor(sinceMinutes);
@@ -464,7 +486,7 @@ export function staleCacheStatsBuckets(sinceMinutes: number): StaleCacheStatsBuc
          COUNT(*) as total,
          SUM(served_stale_cache) as staleCount
        FROM query_events
-       WHERE completed_at >= ?
+       WHERE completed_at >= ? AND ${originClause(origin)}
        GROUP BY bucket
        ORDER BY bucket ASC`
     )

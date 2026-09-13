@@ -7,7 +7,17 @@ import {
   apiTypeStatsBuckets,
   staleCacheStatsBuckets,
   IngestEvent,
+  QueryOrigin,
 } from "./db";
+
+// Shared by every read endpoint below -- see originClause's comment in
+// db.ts for why this exists. Anything unrecognized falls back to 'user'
+// (excluding Cube's internal scheduler activity), the same as omitting
+// the param entirely.
+function parseOrigin(url: URL): QueryOrigin | undefined {
+  const raw = url.searchParams.get("origin");
+  return raw === "internal" || raw === "all" ? raw : undefined;
+}
 
 // api.raw throughout, matching preaggregations/api.ts's established
 // pattern in this project: query-string/body parsing done by hand rather
@@ -55,6 +65,7 @@ export const list = api.raw(
       sinceMinutes: url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : undefined,
       limit: url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined,
       offset: url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : undefined,
+      origin: parseOrigin(url),
     };
     sendJson(resp, 200, listEvents(params));
   }
@@ -65,7 +76,7 @@ export const stats = api.raw(
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: statsBuckets(sinceMinutes) });
+    sendJson(resp, 200, { buckets: statsBuckets(sinceMinutes, parseOrigin(url)) });
   }
 );
 
@@ -74,7 +85,7 @@ export const cacheStats = api.raw(
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: cacheStatsBuckets(sinceMinutes) });
+    sendJson(resp, 200, { buckets: cacheStatsBuckets(sinceMinutes, parseOrigin(url)) });
   }
 );
 
@@ -83,7 +94,7 @@ export const apiTypeStats = api.raw(
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: apiTypeStatsBuckets(sinceMinutes) });
+    sendJson(resp, 200, { buckets: apiTypeStatsBuckets(sinceMinutes, parseOrigin(url)) });
   }
 );
 
@@ -92,6 +103,6 @@ export const staleCacheStats = api.raw(
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
     const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: staleCacheStatsBuckets(sinceMinutes) });
+    sendJson(resp, 200, { buckets: staleCacheStatsBuckets(sinceMinutes, parseOrigin(url)) });
   }
 );

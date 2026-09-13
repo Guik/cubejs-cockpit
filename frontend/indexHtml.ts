@@ -201,6 +201,7 @@ export const INDEX_HTML = `<!doctype html>
   </section>
   <section id="queries">
     <div id="query-timerange-host"></div>
+    <div id="query-origin-host"></div>
     <h2>Query volume &amp; duration</h2>
     <div id="query-charts-host" class="loading">Loading&hellip;</div>
     <h2>Queries</h2>
@@ -210,6 +211,7 @@ export const INDEX_HTML = `<!doctype html>
   </section>
   <section id="performance">
     <div id="perf-timerange-host"></div>
+    <div id="perf-origin-host"></div>
     <h2>Cache &amp; pre-aggregation performance</h2>
     <div id="perf-charts-host" class="loading">Loading&hellip;</div>
     <h2>Request mix &amp; cache freshness</h2>
@@ -1170,10 +1172,62 @@ function renderTimeRangeBar(hostId) {
   host.append(bar);
 }
 
+// --- Origin toggle: "user" (real end-user traffic, the default) vs
+// "internal" (Cube's own scheduler/refreshKey-check activity) vs "all" --
+// see originClause's comment in dashboard/queryhistory/db.ts for why this
+// distinction exists at all: scheduler activity is indistinguishable from
+// real traffic at a glance and, left mixed in, silently drags duration/
+// count aggregates toward its own ~5000ms polling interval. Shared across
+// the two tabs whose charts read from query_events (query history's own
+// charts, and performance's cache-type/request-mix charts) the same way
+// TIME_RANGE_BAR_HOSTS is -- the Errors tab isn't included since it reads
+// from an entirely different table.
+
+const QUERY_ORIGINS = [
+  { value: 'user', label: 'User' },
+  { value: 'internal', label: 'Internal (scheduler)' },
+  { value: 'all', label: 'All' },
+];
+
+function loadStoredQueryOrigin() {
+  try {
+    const stored = localStorage.getItem('qh-query-origin');
+    if (QUERY_ORIGINS.some(o => o.value === stored)) return stored;
+  } catch (e) { /* ignore */ }
+  return 'user';
+}
+
+let queryOriginState = loadStoredQueryOrigin();
+const ORIGIN_BAR_HOSTS = ['query-origin-host', 'perf-origin-host'];
+const ORIGIN_LISTENERS = [];
+
+function onOriginChange(fn) {
+  ORIGIN_LISTENERS.push(fn);
+}
+
+function renderOriginBar(hostId) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  host.innerHTML = '';
+  const bar = el('div', { class: 'timerange-bar' });
+  for (const origin of QUERY_ORIGINS) {
+    const btn = el('button', {}, [origin.label]);
+    if (origin.value === queryOriginState) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      queryOriginState = origin.value;
+      try { localStorage.setItem('qh-query-origin', origin.value); } catch (e) { /* ignore */ }
+      ORIGIN_BAR_HOSTS.forEach(renderOriginBar);
+      ORIGIN_LISTENERS.forEach(fn => fn());
+    });
+    bar.append(btn);
+  }
+  host.append(bar);
+}
+
 async function loadQueryCharts() {
   const host = document.getElementById('query-charts-host');
   try {
-    const data = await getJSON('/api/query-history/stats?sinceMinutes=' + queryTimeRangeMinutes);
+    const data = await getJSON('/api/query-history/stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState);
     const buckets = data.buckets || [];
     destroyChartsIn(host);
     host.innerHTML = '';
@@ -1200,7 +1254,7 @@ async function loadPerformanceCharts() {
   const compileHost = document.getElementById('perf-compile-charts-host');
   try {
     const [cacheData, compileData] = await Promise.all([
-      getJSON('/api/query-history/cache-stats?sinceMinutes=' + queryTimeRangeMinutes),
+      getJSON('/api/query-history/cache-stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState),
       getJSON('/api/performance/compile-stats?sinceMinutes=' + queryTimeRangeMinutes),
     ]);
 
@@ -1259,8 +1313,8 @@ async function loadPerformanceMixCharts() {
   const host = document.getElementById('perf-mix-charts-host');
   try {
     const [apiTypeData, staleData] = await Promise.all([
-      getJSON('/api/query-history/api-type-stats?sinceMinutes=' + queryTimeRangeMinutes),
-      getJSON('/api/query-history/stale-cache-stats?sinceMinutes=' + queryTimeRangeMinutes),
+      getJSON('/api/query-history/api-type-stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState),
+      getJSON('/api/query-history/stale-cache-stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState),
     ]);
 
     const apiTypeBuckets = pivotApiTypeBuckets(apiTypeData.buckets || []);
@@ -1618,6 +1672,7 @@ async function loadQueryTable() {
     const params = new URLSearchParams();
     if (queryFilterState.search) params.set('search', queryFilterState.search);
     params.set('sinceMinutes', String(queryTimeRangeMinutes));
+    params.set('origin', queryOriginState);
     params.set('limit', '200');
     const data = await getJSON('/api/query-history?' + params.toString());
     renderQueryTable(data.rows || []);
@@ -1672,12 +1727,17 @@ loadModelFiles();
 loadPreAggregations();
 loadBuildHistory();
 TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+ORIGIN_BAR_HOSTS.forEach(renderOriginBar);
 onTimeRangeChange(loadQueryCharts);
 onTimeRangeChange(loadQueryTable);
 onTimeRangeChange(loadPerformanceCharts);
 onTimeRangeChange(loadPerformanceMixCharts);
 onTimeRangeChange(loadErrorCharts);
 onTimeRangeChange(loadRecentErrors);
+onOriginChange(loadQueryCharts);
+onOriginChange(loadQueryTable);
+onOriginChange(loadPerformanceCharts);
+onOriginChange(loadPerformanceMixCharts);
 loadQueryCharts();
 renderQueryFilterBar();
 loadQueryTable();

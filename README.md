@@ -250,6 +250,15 @@ they're meant to sit behind the same private network boundary as the rest
 of the Cube stack (never exposed on a public interface), the same trust
 model Cube Store's own unauthenticated MySQL port already relies on.
 
+The five `/api/query-history*` read endpoints above all take an `origin`
+param (`user` | `internal` | `all`, default `user`) that excludes or
+isolates Cube's own scheduler/refreshKey-check traffic -- see
+`originClause`'s comment in `queryhistory/db.ts` for why that traffic needs
+separating out at all (it's indistinguishable from real requests at a
+glance, and its near-constant ~5000ms duration otherwise skews every
+duration/count aggregate it lands in). The dashboard's own Query
+history/Performance tabs default to `user`, with a toggle to switch.
+
 ### Running locally
 
 Requires Node 22.5+ (for the built-in `node:sqlite` module) and the
