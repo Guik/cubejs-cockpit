@@ -20,7 +20,7 @@ export const INDEX_HTML = `<!doctype html>
   nav { display: flex; gap: 4px; }
   nav button { background: none; border: none; color: #9aa4b2; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   nav button.active { background: #1a1d22; color: #fff; }
-  main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+  main { padding: 20px; max-width: 1800px; margin: 0 auto; }
   section { display: none; }
   section.active { display: block; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin: 24px 0 10px; }
@@ -81,16 +81,12 @@ export const INDEX_HTML = `<!doctype html>
   .json-punct { color: #6b7280; }
   .query-preview { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 
-  /* Hand-rolled SVG charts -- no charting library, same reasoning as the
-     hand-rolled JS/JSON highlighters below. */
+  /* Chart.js-backed charts -- see the "Charts" section below. */
   .charts-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-  .chart-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: #9aa4b2; }
-  .chart-legend-item { display: inline-flex; align-items: center; gap: 5px; }
-  .chart-legend-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
   .compile-note { font-size: 12px; color: #6b7280; margin: -10px 0 20px; }
-  .chart-card { border: 1px solid #23262b; border-radius: 10px; padding: 14px 16px; flex: 1; min-width: 320px; }
+  .chart-card { border: 1px solid #23262b; border-radius: 10px; padding: 14px 16px; flex: 1; min-width: 360px; }
   .chart-card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; font-weight: 500; }
-  .chart-card svg { display: block; width: 100%; height: auto; }
+  .chart-canvas-wrap { position: relative; height: 220px; }
   .chart-empty { color: #6b7280; font-size: 13px; padding: 20px 0; text-align: center; }
   .muted { color: #6b7280; }
   .err { color: #f87171; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
@@ -211,6 +207,12 @@ export const INDEX_HTML = `<!doctype html>
   </div>
 </div>
 
+<!-- Charts (see the render*Chart functions below). Pinned exact version,
+     loaded from a CDN: the one external dependency this otherwise fully
+     self-contained, single-file frontend takes on -- requires the
+     browser viewing the dashboard to reach jsdelivr, which is virtually
+     always true even for an internal-network-only deployment. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
 <script>
 async function getJSON(url) {
   const res = await fetch(url);
@@ -675,142 +677,131 @@ function fmtMs(ms) {
   return (ms / 1000).toFixed(2) + 's';
 }
 
-// --- Hand-rolled SVG bar charts -- no charting library, same reasoning
-// as the hand-rolled syntax highlighters: keeps this one embedded file
-// with no CDN dependency.
+// --- Charts: Chart.js-backed (see the pinned CDN <script> tag above). One
+// canvas per chart-card; before a card's host is torn down for a re-render,
+// destroyChartsIn() looks up and destroys any existing Chart instance on
+// its canvases via Chart.getChart() (Chart.js's own registry, keyed by
+// canvas -- no need to track instances ourselves), so switching time
+// ranges never leaks chart instances.
 
-function svgEl(tag, attrs) {
-  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  if (attrs) for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
-  return node;
+function destroyChartsIn(host) {
+  host.querySelectorAll('canvas').forEach(c => {
+    const existing = Chart.getChart(c);
+    if (existing) existing.destroy();
+  });
 }
 
-// Fixed-width, centered bars rather than stretching to fill the card --
-// with only 1-2 buckets (a fresh deployment, or a quiet period) stretched
-// bars rendered as one giant solid block indistinguishable from a plain
-// rectangle. Baseline + per-bar value label + hour labels make it read as
-// an actual chart even with very little data, not just at high volume.
+const CHART_FONT = { family: '-apple-system, system-ui, sans-serif', size: 11 };
+const CHART_GRID_COLOR = '#1c1f24';
+const CHART_TICK_COLOR = '#6b7280';
+
+// Shared card+canvas scaffold. Renders the "No data yet" placeholder and
+// returns null when there's nothing to plot, so callers can bail out with
+// a single "if (!canvas) return".
+function newChartCard(host, buckets, titleText) {
+  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
+  host.append(card);
+  if (!buckets.length) {
+    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
+    return null;
+  }
+  const wrap = el('div', { class: 'chart-canvas-wrap' });
+  const canvas = el('canvas', null, []);
+  wrap.append(canvas);
+  card.append(wrap);
+  return canvas;
+}
+
+function chartLabels(buckets) {
+  return buckets.map(b => new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+}
+
+// Tooltip title shows the full timestamp (the x-axis labels themselves are
+// just hour:minute, ambiguous across a multi-day range) and, with
+// interaction.mode 'index', every series at that bucket at once -- a real
+// improvement over the old hand-rolled charts' one-title-per-element
+// native tooltip, which only ever showed a single value. filter drops
+// series with no data point in that bucket (renderMultiLineChart's gaps)
+// rather than showing a confusing blank/null line.
+function baseChartOptions(buckets, formatValue, opts) {
+  opts = opts || {};
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 200 },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: {
+        display: !!opts.legend,
+        position: 'bottom',
+        labels: { color: '#9aa4b2', font: CHART_FONT, boxWidth: 10, boxHeight: 10, padding: 12 },
+      },
+      tooltip: {
+        backgroundColor: '#111318',
+        borderColor: '#23262b',
+        borderWidth: 1,
+        padding: 10,
+        titleFont: CHART_FONT,
+        bodyFont: CHART_FONT,
+        titleColor: '#e6e6e6',
+        bodyColor: '#e6e6e6',
+        filter: (item) => item.parsed.y !== null,
+        callbacks: {
+          title: (items) => (items.length ? fmtDate(buckets[items[0].dataIndex].bucket) : ''),
+          label: (item) => (item.dataset.label ? item.dataset.label + ': ' : '') + formatValue(item.parsed.y),
+        },
+      },
+    },
+    scales: {
+      x: {
+        stacked: !!opts.stacked,
+        grid: { display: false },
+        ticks: { color: CHART_TICK_COLOR, font: CHART_FONT, maxRotation: 0, autoSkip: true },
+      },
+      y: {
+        stacked: !!opts.stacked,
+        beginAtZero: true,
+        grid: { color: CHART_GRID_COLOR },
+        ticks: { color: CHART_TICK_COLOR, font: CHART_FONT, callback: formatValue },
+      },
+    },
+  };
+}
+
+// Chart.js's own categoryPercentage/maxBarThickness keep bars a sane fixed
+// width instead of stretching to fill the card -- with only 1-2 buckets (a
+// fresh deployment, or a quiet period) a full-width bar reads as a single
+// solid block, indistinguishable from a plain rectangle.
 function renderBarChart(host, buckets, valueFn, color, formatValue, titleText) {
-  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
-  if (!buckets.length) {
-    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
-    host.append(card);
-    return;
-  }
-  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
-  const plotHeight = height - padTop - padBottom;
-  const values = buckets.map(valueFn);
-  const max = Math.max.apply(null, values.concat([1]));
-  const slot = (width - padSide * 2) / buckets.length;
-  const barWidth = Math.min(slot * 0.6, 48);
-  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
-
-  svg.append(svgEl('line', {
-    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
-    stroke: '#23262b', 'stroke-width': 1,
-  }));
-
-  const showValueLabels = buckets.length <= 24;
-  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
-
-  buckets.forEach((b, i) => {
-    const v = values[i];
-    const barHeight = v > 0 ? Math.max((v / max) * plotHeight, 2) : 0;
-    const slotX = padSide + i * slot;
-    const x = slotX + (slot - barWidth) / 2;
-    const y = height - padBottom - barHeight;
-
-    const rect = svgEl('rect', { x: x, y: y, width: barWidth, height: barHeight, fill: color, rx: 2 });
-    const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-    titleNode.textContent = b.bucket + ': ' + formatValue(v);
-    rect.append(titleNode);
-    svg.append(rect);
-
-    if (showValueLabels && v > 0) {
-      const label = svgEl('text', {
-        x: slotX + slot / 2, y: y - 4, 'text-anchor': 'middle', 'font-size': '9', fill: '#9aa4b2',
-      });
-      label.textContent = formatValue(v);
-      svg.append(label);
-    }
-
-    if (i % labelStride === 0) {
-      const xLabel = svgEl('text', {
-        x: slotX + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
-      });
-      xLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      svg.append(xLabel);
-    }
+  const canvas = newChartCard(host, buckets, titleText);
+  if (!canvas) return;
+  new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: chartLabels(buckets),
+      datasets: [{ data: buckets.map(valueFn), backgroundColor: color, borderRadius: 2, maxBarThickness: 48, categoryPercentage: 0.6 }],
+    },
+    options: baseChartOptions(buckets, formatValue),
   });
-
-  card.append(svg);
-  host.append(card);
 }
 
-// Same axes/padding/labeling as renderBarChart, connected points instead
-// of bars -- a more natural read for a continuously-varying value like
-// average duration than discrete bars.
+// Same axes as renderBarChart, connected points instead of bars -- a more
+// natural read for a continuously-varying value like average duration
+// than discrete bars.
 function renderLineChart(host, buckets, valueFn, color, formatValue, titleText) {
-  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
-  if (!buckets.length) {
-    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
-    host.append(card);
-    return;
-  }
-  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
-  const plotHeight = height - padTop - padBottom;
-  const values = buckets.map(valueFn);
-  const max = Math.max.apply(null, values.concat([1]));
-  const slot = (width - padSide * 2) / buckets.length;
-  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
-
-  svg.append(svgEl('line', {
-    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
-    stroke: '#23262b', 'stroke-width': 1,
-  }));
-
-  const points = buckets.map((b, i) => {
-    const v = values[i];
-    const x = padSide + i * slot + slot / 2;
-    const y = height - padBottom - (max > 0 ? (v / max) * plotHeight : 0);
-    return { x: x, y: y, v: v, bucket: b.bucket };
+  const canvas = newChartCard(host, buckets, titleText);
+  if (!canvas) return;
+  new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: chartLabels(buckets),
+      datasets: [{
+        data: buckets.map(valueFn), borderColor: color, backgroundColor: color,
+        pointRadius: 3, pointHoverRadius: 5, tension: 0.25, fill: false,
+      }],
+    },
+    options: baseChartOptions(buckets, formatValue),
   });
-
-  if (points.length > 1) {
-    const pathD = points.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join(' ');
-    svg.append(svgEl('path', {
-      d: pathD, fill: 'none', stroke: color, 'stroke-width': 2,
-      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-    }));
-  }
-
-  const showValueLabels = buckets.length <= 24;
-  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
-
-  points.forEach((p, i) => {
-    const dot = svgEl('circle', { cx: p.x, cy: p.y, r: 3, fill: color });
-    const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-    titleNode.textContent = p.bucket + ': ' + formatValue(p.v);
-    dot.append(titleNode);
-    svg.append(dot);
-
-    if (showValueLabels && p.v > 0) {
-      const label = svgEl('text', { x: p.x, y: p.y - 6, 'text-anchor': 'middle', 'font-size': '9', fill: '#9aa4b2' });
-      label.textContent = formatValue(p.v);
-      svg.append(label);
-    }
-
-    if (i % labelStride === 0) {
-      const xLabel = svgEl('text', {
-        x: p.x, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
-      });
-      xLabel.textContent = new Date(p.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      svg.append(xLabel);
-    }
-  });
-
-  card.append(svg);
-  host.append(card);
 }
 
 // Cache-type series shared by the two multi-series charts below. Order
@@ -845,138 +836,55 @@ function pivotCacheBuckets(rows) {
   return [...byBucket.values()].sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
 }
 
-function chartLegend(seriesKeys, colorMap, labelMap) {
-  return el('div', { class: 'chart-legend' }, seriesKeys.map(k => el('span', { class: 'chart-legend-item' }, [
-    el('span', { class: 'chart-legend-swatch', style: 'background:' + colorMap[k] }, []),
-    labelMap[k],
-  ])));
-}
-
-// Same fixed-width-bar approach as renderBarChart, stacking each bucket's
-// series on top of each other instead of drawing a single value.
+// Same fixed-bar-width approach as renderBarChart, stacking each bucket's
+// series on top of each other instead of drawing a single value. The
+// legend is interactive (Chart.js's default): click a series to isolate
+// it, unlike the old hand-rolled legend which was decoration only.
 function renderStackedBarChart(host, buckets, seriesKeys, colorMap, labelMap, titleText) {
-  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
-  if (!buckets.length) {
-    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
-    host.append(card);
-    return;
-  }
-  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
-  const plotHeight = height - padTop - padBottom;
-  const totals = buckets.map(b => seriesKeys.reduce((s, k) => s + (b[k] ? b[k].count : 0), 0));
-  const max = Math.max.apply(null, totals.concat([1]));
-  const slot = (width - padSide * 2) / buckets.length;
-  const barWidth = Math.min(slot * 0.6, 48);
-  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
-
-  svg.append(svgEl('line', {
-    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
-    stroke: '#23262b', 'stroke-width': 1,
-  }));
-
-  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
-
-  buckets.forEach((b, i) => {
-    const slotX = padSide + i * slot;
-    const x = slotX + (slot - barWidth) / 2;
-    let yCursor = height - padBottom;
-    for (const key of seriesKeys) {
-      const count = b[key] ? b[key].count : 0;
-      if (!count) continue;
-      const segHeight = Math.max((count / max) * plotHeight, 1);
-      const y = yCursor - segHeight;
-      const rect = svgEl('rect', { x: x, y: y, width: barWidth, height: segHeight, fill: colorMap[key] });
-      const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-      titleNode.textContent = b.bucket + ' \\u00b7 ' + labelMap[key] + ': ' + count;
-      rect.append(titleNode);
-      svg.append(rect);
-      yCursor = y;
-    }
-    if (i % labelStride === 0) {
-      const xLabel = svgEl('text', {
-        x: slotX + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
-      });
-      xLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      svg.append(xLabel);
-    }
+  const canvas = newChartCard(host, buckets, titleText);
+  if (!canvas) return;
+  new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: chartLabels(buckets),
+      datasets: seriesKeys.map(key => ({
+        label: labelMap[key],
+        data: buckets.map(b => (b[key] ? b[key].count : 0)),
+        backgroundColor: colorMap[key],
+        maxBarThickness: 48,
+        categoryPercentage: 0.6,
+      })),
+    },
+    options: baseChartOptions(buckets, (v) => String(v), { legend: true, stacked: true }),
   });
-
-  card.append(svg);
-  card.append(chartLegend(seriesKeys, colorMap, labelMap));
-  host.append(card);
 }
 
-// Same axes/padding as renderLineChart, one path per series. Paths break
-// (rather than interpolate) across a bucket where that series had zero
-// requests -- a straight line through a gap would imply a response time
-// that was never actually observed.
+// Same axes as renderLineChart, one dataset per series. spanGaps: false
+// (Chart.js's default, made explicit here) breaks each line across a
+// bucket where that series had zero requests, rather than interpolating
+// through it -- a straight line through the gap would imply a response
+// time that was never actually observed.
 function renderMultiLineChart(host, buckets, seriesKeys, colorMap, labelMap, formatValue, titleText) {
-  const card = el('div', { class: 'chart-card' }, [el('h3', null, [titleText])]);
-  if (!buckets.length) {
-    card.append(el('div', { class: 'chart-empty' }, ['No data yet.']));
-    host.append(card);
-    return;
-  }
-  const width = 600, height = 160, padTop = 18, padBottom = 28, padSide = 10;
-  const plotHeight = height - padTop - padBottom;
-  const allValues = [];
-  for (const b of buckets) for (const k of seriesKeys) if (b[k]) allValues.push(b[k].avgDurationMs);
-  const max = Math.max.apply(null, allValues.concat([1]));
-  const slot = (width - padSide * 2) / buckets.length;
-  const svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, preserveAspectRatio: 'xMidYMid meet' });
-
-  svg.append(svgEl('line', {
-    x1: padSide, y1: height - padBottom, x2: width - padSide, y2: height - padBottom,
-    stroke: '#23262b', 'stroke-width': 1,
-  }));
-
-  for (const key of seriesKeys) {
-    const points = buckets.map((b, i) => {
-      const entry = b[key];
-      if (!entry) return null;
-      const x = padSide + i * slot + slot / 2;
-      const y = height - padBottom - (max > 0 ? (entry.avgDurationMs / max) * plotHeight : 0);
-      return { x: x, y: y, v: entry.avgDurationMs, bucket: b.bucket };
-    });
-
-    let pathD = '';
-    let started = false;
-    for (const p of points) {
-      if (!p) { started = false; continue; }
-      pathD += (started ? ' L' : ' M') + p.x.toFixed(1) + ' ' + p.y.toFixed(1);
-      started = true;
-    }
-    if (pathD) {
-      svg.append(svgEl('path', {
-        d: pathD.trim(), fill: 'none', stroke: colorMap[key], 'stroke-width': 2,
-        'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-      }));
-    }
-
-    points.forEach(p => {
-      if (!p) return;
-      const dot = svgEl('circle', { cx: p.x, cy: p.y, r: 2.5, fill: colorMap[key] });
-      const titleNode = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-      titleNode.textContent = p.bucket + ' \\u00b7 ' + labelMap[key] + ': ' + formatValue(p.v);
-      dot.append(titleNode);
-      svg.append(dot);
-    });
-  }
-
-  const labelStride = Math.max(1, Math.ceil(buckets.length / 12));
-  buckets.forEach((b, i) => {
-    if (i % labelStride === 0) {
-      const xLabel = svgEl('text', {
-        x: padSide + i * slot + slot / 2, y: height - padBottom + 14, 'text-anchor': 'middle', 'font-size': '9', fill: '#6b7280',
-      });
-      xLabel.textContent = new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      svg.append(xLabel);
-    }
+  const canvas = newChartCard(host, buckets, titleText);
+  if (!canvas) return;
+  new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: chartLabels(buckets),
+      datasets: seriesKeys.map(key => ({
+        label: labelMap[key],
+        data: buckets.map(b => (b[key] ? b[key].avgDurationMs : null)),
+        borderColor: colorMap[key],
+        backgroundColor: colorMap[key],
+        pointRadius: 2.5,
+        pointHoverRadius: 5,
+        tension: 0.25,
+        fill: false,
+        spanGaps: false,
+      })),
+    },
+    options: baseChartOptions(buckets, formatValue, { legend: true }),
   });
-
-  card.append(svg);
-  card.append(chartLegend(seriesKeys, colorMap, labelMap));
-  host.append(card);
 }
 
 // --- Time range selector (drives both the charts and the table below) ---
@@ -1040,12 +948,14 @@ async function loadQueryCharts() {
   try {
     const data = await getJSON('/api/query-history/stats?sinceMinutes=' + queryTimeRangeMinutes);
     const buckets = data.buckets || [];
+    destroyChartsIn(host);
     host.innerHTML = '';
     const row = el('div', { class: 'charts-row' });
     host.append(row);
     renderBarChart(row, buckets, b => b.count, '#93c5fd', v => String(v) + ' queries', 'Query count (last ' + currentRangeLabel() + ')');
     renderLineChart(row, buckets, b => b.avgDurationMs || 0, '#f9a8d4', v => fmtMs(Math.round(v)), 'Avg duration (last ' + currentRangeLabel() + ')');
   } catch (e) {
+    destroyChartsIn(host);
     host.innerHTML = '';
     host.append(errBox(e));
   }
@@ -1068,6 +978,7 @@ async function loadPerformanceCharts() {
     ]);
 
     const cacheBuckets = pivotCacheBuckets(cacheData.buckets || []);
+    destroyChartsIn(cacheHost);
     cacheHost.innerHTML = '';
     const cacheRow = el('div', { class: 'charts-row' });
     cacheHost.append(cacheRow);
@@ -1075,6 +986,7 @@ async function loadPerformanceCharts() {
     renderMultiLineChart(cacheRow, cacheBuckets, CACHE_TYPE_ORDER, CACHE_TYPE_COLORS, CACHE_TYPE_LABELS, v => fmtMs(Math.round(v)), 'Avg response time by cache type (last ' + currentRangeLabel() + ')');
 
     const compileBuckets = compileData.buckets || [];
+    destroyChartsIn(compileHost);
     compileHost.innerHTML = '';
     const compileRow = el('div', { class: 'charts-row' });
     compileHost.append(compileRow);
@@ -1091,8 +1003,10 @@ async function loadPerformanceCharts() {
         : 'No schema compilations in this window -- expected for a stable deployment: compilers stay cached until the schema version changes.',
     ]));
   } catch (e) {
+    destroyChartsIn(cacheHost);
     cacheHost.innerHTML = '';
     cacheHost.append(errBox(e));
+    destroyChartsIn(compileHost);
     compileHost.innerHTML = '';
   }
 }
@@ -1129,6 +1043,7 @@ async function loadPerformanceMixCharts() {
 
     const staleBuckets = staleData.buckets || [];
 
+    destroyChartsIn(host);
     host.innerHTML = '';
     const row = el('div', { class: 'charts-row' });
     host.append(row);
@@ -1141,6 +1056,7 @@ async function loadPerformanceMixCharts() {
       'Stale-cache-served rate (last ' + currentRangeLabel() + ')'
     );
   } catch (e) {
+    destroyChartsIn(host);
     host.innerHTML = '';
     host.append(errBox(e));
   }
@@ -1174,11 +1090,13 @@ async function loadErrorCharts() {
   try {
     const data = await getJSON('/api/performance/error-stats?sinceMinutes=' + queryTimeRangeMinutes);
     const buckets = pivotErrorBuckets(data.buckets || []);
+    destroyChartsIn(host);
     host.innerHTML = '';
     const row = el('div', { class: 'charts-row' });
     host.append(row);
     renderStackedBarChart(row, buckets, ERROR_KIND_ORDER, ERROR_KIND_COLORS, ERROR_KIND_LABELS, 'Auth failures & pre-agg build errors (last ' + currentRangeLabel() + ')');
   } catch (e) {
+    destroyChartsIn(host);
     host.innerHTML = '';
     host.append(errBox(e));
   }
