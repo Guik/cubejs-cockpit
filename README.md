@@ -278,9 +278,12 @@ data posted directly to their ingest endpoints (see **API** above).
 ## Building your own image
 
 Most deployments don't need this -- pull `ghcr.io/guik/cubejs-cockpit:latest`
-as described in **Getting started** above. Build locally instead
-if you're testing an unreleased change, working offline/air-gapped, or
-maintaining a fork:
+as described in **Getting started** above. For testing an unreleased
+change without building anything yourself, `ghcr.io/guik/cubejs-cockpit:dev`
+is published automatically on every push to the `dev` branch (a floating
+tag, not a stable release -- check the version pill in the header to see
+exactly which commit it's running). Build locally instead if you're
+working offline/air-gapped or maintaining a fork:
 
 ```bash
 ./scripts/build.sh                        # builds cubejs-cockpit:latest

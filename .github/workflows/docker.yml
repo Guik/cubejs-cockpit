@@ -2,11 +2,15 @@ name: Docker image
 
 # Builds the image with `encore build docker` (see scripts/build.sh and the
 # README's "Building for deployment" section for why there's no Dockerfile).
-# PRs only build, to make sure nothing broke -- nothing is pushed except on a
-# version tag, and forked-repo PRs never see registry credentials.
+# PRs only build, to make sure nothing broke -- nothing is pushed except on
+# a version tag or a push to dev, and forked-repo PRs never see registry
+# credentials. A version tag publishes :sha-*, :vX.Y.Z and :latest, plus a
+# GitHub release; dev publishes only a floating :dev, for testing an
+# unreleased build without cutting a real version.
 
 on:
   push:
+    branches: [dev]
     tags: ["v*"]
   pull_request:
     branches: [main]
@@ -43,8 +47,11 @@ jobs:
       # Bakes the tag being built into the image itself (frontend/indexHtml.ts
       # displays shared/version.ts's APP_VERSION) -- so the running dashboard
       # can always show which version it actually is, with nothing for a
-      # deployer to configure or keep in sync. PR builds never get pushed
-      # anywhere, so a dev-<sha> placeholder is fine for them.
+      # deployer to configure or keep in sync. dev-<sha> for anything that
+      # isn't a version tag: PR validation builds (never pushed anywhere,
+      # so the exact value is moot) and the floating :dev image, where
+      # showing the real sha in the header is the point -- :dev itself
+      # never changes, so this is the only way to tell which commit it is.
       - name: Resolve app version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -70,16 +77,21 @@ jobs:
         run: |
           set -euo pipefail
           image="${{ steps.image.outputs.name }}"
-          version="${GITHUB_REF#refs/tags/}"
 
           docker tag "$image:ci" "$image:sha-${GITHUB_SHA::12}"
           docker push "$image:sha-${GITHUB_SHA::12}"
 
-          docker tag "$image:ci" "$image:$version"
-          docker push "$image:$version"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            docker tag "$image:ci" "$image:$version"
+            docker push "$image:$version"
 
-          docker tag "$image:ci" "$image:latest"
-          docker push "$image:latest"
+            docker tag "$image:ci" "$image:latest"
+            docker push "$image:latest"
+          elif [[ "$GITHUB_REF" == "refs/heads/dev" ]]; then
+            docker tag "$image:ci" "$image:dev"
+            docker push "$image:dev"
+          fi
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
