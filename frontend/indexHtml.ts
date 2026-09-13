@@ -37,6 +37,22 @@ export const INDEX_HTML = `<!doctype html>
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c1f24; vertical-align: top; }
   th { color: #6b7280; font-weight: 500; }
+  .filterable-th { position: relative; }
+  .col-filter-btn { background: none; border: none; color: #6b7280; cursor: pointer; font-size: 9px; padding: 2px 0 2px 4px; vertical-align: middle; }
+  .col-filter-btn:hover { color: #9aa4b2; }
+  .col-filter-btn.active { color: #4ade80; }
+  .col-filter-popover { position: absolute; top: 100%; left: 0; z-index: 50; background: #111318; border: 1px solid #23262b; border-radius: 8px; padding: 8px; min-width: 200px; max-width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); font-weight: 400; text-transform: none; letter-spacing: normal; white-space: normal; }
+  .col-filter-search { width: 100%; box-sizing: border-box; margin-bottom: 6px; background: #0b0d10; border: 1px solid #23262b; color: #e6e6e6; border-radius: 6px; padding: 4px 8px; font-size: 12px; font-family: inherit; }
+  .col-filter-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+  .col-filter-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #e6e6e6; padding: 3px 4px; border-radius: 4px; cursor: pointer; }
+  .col-filter-item:hover { background: #1a1d22; }
+  .col-filter-item span:first-of-type { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col-filter-count { color: #6b7280; font-size: 11px; }
+  .col-filter-actions { display: flex; gap: 6px; margin-top: 6px; padding-top: 6px; border-top: 1px solid #23262b; }
+  .col-filter-actions button { flex: 1; background: #1a1d22; border: 1px solid #23262b; color: #9aa4b2; border-radius: 6px; padding: 3px 0; font-size: 11px; cursor: pointer; }
+  .col-filter-actions button:hover { border-color: #3b4252; color: #fff; }
+  .col-filter-empty { color: #6b7280; font-size: 12px; padding: 6px 0; text-align: center; }
+  .filter-clear-btn { background: none; border: none; color: #f9a8d4; cursor: pointer; font-size: 12px; padding: 0; text-decoration: underline; }
   code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
   pre { background: #0b0d10; border: 1px solid #23262b; border-radius: 8px; padding: 14px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
   .cube-block { border: 1px solid #23262b; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
@@ -181,6 +197,7 @@ export const INDEX_HTML = `<!doctype html>
     <div id="query-charts-host" class="loading">Loading&hellip;</div>
     <h2>Queries</h2>
     <div id="query-filter-host"></div>
+    <div id="query-filter-summary-host"></div>
     <div id="query-table-host" class="loading">Loading&hellip;</div>
   </section>
   <section id="performance">
@@ -248,6 +265,165 @@ function typePill(type) {
   if (!type) return '';
   const cls = AGG_TYPES.has(type) ? 'type-agg' : ['string', 'number', 'time'].includes(type) ? 'type-' + type : 'type-other';
   return el('span', { class: 'pill ' + cls }, [type]);
+}
+
+// --- Smart per-column header filters, shared by the pre-aggregations and
+// query history tables below ---
+//
+// Excel/Sheets-style AutoFilter: a small caret on a filterable header opens
+// a checkbox list of the distinct values present in that column (a search
+// box appears once there are more than a few, for columns with lots of
+// distinct values). Checked values within one column OR together; filtered
+// columns AND together. Each column's own list is computed against rows
+// already matching every OTHER active column filter, not its own -- so
+// unchecking a value never makes it vanish from its own list, matching
+// standard AutoFilter behavior.
+//
+// A "columns" array here is a list of { key, label, filterValue?,
+// formatValue? } -- filterValue's presence marks a column as filterable;
+// formatValue (default identity) turns a raw value into its checkbox
+// label. columnFilters is a plain object of key -> Set of selected raw
+// values (empty Set = column not filtered). "ui" is a small per-table
+// { openKey, search } object tracking which column's popover (if any) is
+// open and what's typed into its search box.
+//
+// Every interaction -- opening/closing a popover, typing a search term,
+// checking a box -- calls back into the table's own full render function
+// rather than patching the DOM in place. That's deliberately the same
+// pattern sort-on-click already uses elsewhere in this file, and it's what
+// makes a popover reappear open after a checkbox click "just work": the
+// render function reads ui.openKey/ui.search fresh every time, so there's
+// no DOM state to preserve across the re-render.
+
+const columnFilterRegistry = new Map(); // ui object -> that table's render function
+function closeAnyOpenColumnFilter() {
+  for (const [ui, rerender] of columnFilterRegistry) {
+    if (ui.openKey !== null) { ui.openKey = null; rerender(); }
+  }
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.col-filter-popover') || e.target.closest('.col-filter-btn')) return;
+  closeAnyOpenColumnFilter();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAnyOpenColumnFilter(); });
+
+function rowMatchesColumnFilters(row, columns, columnFilters) {
+  for (const col of columns) {
+    if (!col.filterValue) continue;
+    const selected = columnFilters[col.key];
+    if (selected && selected.size && !selected.has(col.filterValue(row))) return false;
+  }
+  return true;
+}
+
+function computeColumnValues(rows, columns, columnFilters, col) {
+  const counts = new Map();
+  for (const row of rows) {
+    let matches = true;
+    for (const other of columns) {
+      if (!other.filterValue || other.key === col.key) continue;
+      const selected = columnFilters[other.key];
+      if (selected && selected.size && !selected.has(other.filterValue(row))) { matches = false; break; }
+    }
+    if (!matches) continue;
+    const v = col.filterValue(row);
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || String(a.value).localeCompare(String(b.value)));
+}
+
+function anyColumnFilterActive(columnFilters) {
+  return Object.values(columnFilters).some(s => s.size > 0);
+}
+
+// Renders a "Clear column filters" link into hostId, only while at least
+// one column filter is active -- a way back out without having to open
+// each popover and hit "None" individually.
+function renderColumnFilterSummary(hostId, columnFilters, onClear) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  host.innerHTML = '';
+  if (!anyColumnFilterActive(columnFilters)) return;
+  const btn = el('button', { type: 'button', class: 'filter-clear-btn' }, ['Clear column filters']);
+  btn.addEventListener('click', () => {
+    Object.values(columnFilters).forEach(s => s.clear());
+    onClear();
+  });
+  host.append(btn);
+}
+
+// Mutates "th" in place, appending the filter caret (and, if this column's
+// popover is the one currently open per "ui", the popover itself). Callers
+// build the rest of the <th> (label, sort click handler, ...) themselves;
+// this only ever adds to it, so it composes with a sortable header (the
+// pre-aggregations table) or a plain one (query history) the same way.
+function appendColumnFilterUI(th, col, allRows, columns, columnFilters, ui, onChange) {
+  columnFilterRegistry.set(ui, onChange);
+  th.classList.add('filterable-th');
+  const selected = columnFilters[col.key];
+
+  const btn = el('button', {
+    type: 'button', class: 'col-filter-btn' + (selected.size ? ' active' : ''), title: 'Filter',
+  }, ['\\u25be']);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    ui.openKey = ui.openKey === col.key ? null : col.key;
+    ui.search = '';
+    onChange();
+  });
+  th.append(btn);
+
+  if (ui.openKey !== col.key) return;
+
+  const formatValue = col.formatValue || ((v) => String(v));
+  const values = computeColumnValues(allRows, columns, columnFilters, col);
+
+  const pop = el('div', { class: 'col-filter-popover' });
+  pop.addEventListener('click', (e) => e.stopPropagation());
+
+  let searchInput = null;
+  if (values.length > 8) {
+    searchInput = el('input', { type: 'search', class: 'col-filter-search', placeholder: 'Search\\u2026' });
+    searchInput.value = ui.search;
+    searchInput.addEventListener('input', () => { ui.search = searchInput.value.trim().toLowerCase(); onChange(); });
+    pop.append(searchInput);
+  }
+
+  const term = ui.search;
+  const filtered = values.filter(v => !term || formatValue(v.value).toLowerCase().includes(term));
+  const listHost = el('div', { class: 'col-filter-list' });
+  if (!filtered.length) {
+    listHost.append(el('div', { class: 'col-filter-empty' }, ['No matches']));
+  } else {
+    filtered.forEach(v => {
+      const cb = el('input', { type: 'checkbox' }, []);
+      cb.checked = selected.has(v.value);
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(v.value); else selected.delete(v.value);
+        onChange();
+      });
+      listHost.append(el('label', { class: 'col-filter-item' }, [
+        cb, el('span', null, [formatValue(v.value)]), el('span', { class: 'col-filter-count' }, [String(v.count)]),
+      ]));
+    });
+  }
+  pop.append(listHost);
+
+  const actions = el('div', { class: 'col-filter-actions' });
+  const allBtn = el('button', { type: 'button' }, ['All']);
+  allBtn.addEventListener('click', () => { filtered.forEach(v => selected.add(v.value)); onChange(); });
+  const noneBtn = el('button', { type: 'button' }, ['None']);
+  noneBtn.addEventListener('click', () => { selected.clear(); onChange(); });
+  actions.append(allBtn, noneBtn);
+  pop.append(actions);
+
+  th.append(pop);
+  if (searchInput) {
+    searchInput.focus();
+    searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
+  }
 }
 
 // --- Data model tab ---
@@ -440,25 +616,31 @@ function matchesFilter(preAggId, tableName, state) {
 }
 
 const COLUMNS = [
-  { key: 'preAggId', label: 'Pre-aggregation', sort: (r) => r.preAggId },
-  { key: 'tableName', label: 'Table name', sort: (r) => r.partition.tableName || '' },
+  { key: 'preAggId', label: 'Pre-aggregation', sort: (r) => r.preAggId, filterValue: (r) => r.preAggId },
+  { key: 'tableName', label: 'Table name', sort: (r) => r.partition.tableName || '', filterValue: (r) => r.partition.tableName || '(none)' },
   { key: 'buildRangeStart', label: 'Build range', sort: (r) => r.partition.buildRangeStart || '' },
   { key: 'sealAt', label: 'Seal at', sort: (r) => r.partition.sealAt || '' },
-  { key: 'lastUpdated', label: 'Last updated', sort: (r) => lastUpdated(r.partition) || 0 },
+  {
+    key: 'lastUpdated', label: 'Last updated', sort: (r) => lastUpdated(r.partition) || 0,
+    filterValue: (r) => ((r.partition.versionEntries || []).length > 0 ? 'built' : 'empty'),
+    formatValue: (v) => (v === 'built' ? 'built' : 'no data'),
+  },
 ];
 
 let sortState = { key: 'lastUpdated', dir: 'desc' };
-let preaggFilterState = { preAggId: '', search: '' };
+let preaggColumnFilters = { preAggId: new Set(), tableName: new Set(), lastUpdated: new Set() };
+let preaggFilterUi = { openKey: null, search: '' };
 let preaggAllRows = [];
 
 function renderPreaggTable() {
   const host = document.getElementById('preagg-table-host');
   host.innerHTML = '';
+  renderColumnFilterSummary('preagg-filter-host', preaggColumnFilters, renderPreaggTable);
 
-  const rows = preaggAllRows.filter(r => matchesFilter(r.preAggId, r.partition.tableName, preaggFilterState));
+  const rows = preaggAllRows.filter(r => rowMatchesColumnFilters(r, COLUMNS, preaggColumnFilters));
 
   if (!rows.length) {
-    host.append(el('div', { class: 'muted' }, [preaggAllRows.length ? 'No partitions match this filter.' : 'No partitions found.']));
+    host.append(el('div', { class: 'muted' }, [preaggAllRows.length ? 'No partitions match the current filters.' : 'No partitions found.']));
     return;
   }
 
@@ -480,6 +662,7 @@ function renderPreaggTable() {
       }
       renderPreaggTable();
     });
+    if (col.filterValue) appendColumnFilterUI(th, col, preaggAllRows, COLUMNS, preaggColumnFilters, preaggFilterUi, renderPreaggTable);
     return th;
   }));
 
@@ -515,8 +698,6 @@ async function loadPreAggregations() {
       }
     }
     preaggAllRows = rows;
-    const ids = [...new Set(rows.map(r => r.preAggId))].sort();
-    renderFilterBar('preagg-filter-host', ids, preaggFilterState, renderPreaggTable);
     renderPreaggTable();
   } catch (e) {
     host.innerHTML = '';
@@ -1147,21 +1328,18 @@ async function loadRecentErrors() {
 
 // --- Query table, filter, overlay ---
 
-let queryFilterState = { status: '', search: '' };
+// Status/source/API type are all filterable straight from their column
+// headers now (see appendColumnFilterUI) -- this bar keeps only the free-
+// text search, which still needs a server round-trip (it matches against
+// the full query_json of every stored row, not just the 200 already
+// loaded for the current time range) so it can't become a client-side
+// column filter the way the other three did.
+let queryFilterState = { search: '' };
 let queryFilterDebounce;
 
 function renderQueryFilterBar() {
   const host = document.getElementById('query-filter-host');
   host.innerHTML = '';
-  const select = el('select', null, [
-    el('option', { value: '' }, ['All statuses']),
-    el('option', { value: 'success' }, ['success']),
-    el('option', { value: 'error' }, ['error']),
-    el('option', { value: 'pending' }, ['pending']),
-  ]);
-  select.value = queryFilterState.status;
-  select.addEventListener('change', () => { queryFilterState.status = select.value; loadQueryTable(); });
-
   const input = el('input', { type: 'search', placeholder: 'Search query\\u2026' });
   input.value = queryFilterState.search;
   input.addEventListener('input', () => {
@@ -1169,25 +1347,25 @@ function renderQueryFilterBar() {
     clearTimeout(queryFilterDebounce);
     queryFilterDebounce = setTimeout(loadQueryTable, 300);
   });
-
-  host.append(el('div', { class: 'filter-bar' }, [select, input]));
+  host.append(el('div', { class: 'filter-bar' }, [input]));
 }
 
 // usedPreAggregation: 1 = resolved from a rollup already in Cube Store
 // (fast path), 0 = hit the source database directly, null = unknown (the
-// query never got far enough to tell -- most error types). servedStaleCache
-// is a separate, orthogonal signal: Cube served an already-cached result
-// because the freshness recheck was too slow to wait on -- can happen
-// either way, so it's a second badge, not an alternative to the first.
+// query never got far enough to tell -- most error types).
+function sourceKey(row) {
+  if (row.usedPreAggregation === 1) return 'preagg';
+  if (row.usedPreAggregation === 0) return 'scan';
+  return 'unknown';
+}
+const SOURCE_LABELS = { preagg: 'pre-aggregation', scan: 'source scan', unknown: 'unknown' };
+
+// servedStaleCache is a separate, orthogonal signal: Cube served an
+// already-cached result because the freshness recheck was too slow to
+// wait on -- can happen either way, so it's a second badge, not an
+// alternative to the Source pill above.
 function sourcePill(row) {
-  const pills = [];
-  if (row.usedPreAggregation === 1) {
-    pills.push(el('span', { class: 'pill source-preagg' }, ['pre-aggregation']));
-  } else if (row.usedPreAggregation === 0) {
-    pills.push(el('span', { class: 'pill source-scan' }, ['source scan']));
-  } else {
-    pills.push(el('span', { class: 'pill source-unknown' }, ['unknown']));
-  }
+  const pills = [el('span', { class: 'pill source-' + sourceKey(row) }, [SOURCE_LABELS[sourceKey(row)]])];
   if (row.servedStaleCache) {
     pills.push(el('span', { class: 'pill cache-stale' }, ['stale cache']));
   }
@@ -1322,21 +1500,49 @@ function openQueryOverlay(row) {
   document.getElementById('overlay-backdrop').hidden = false;
 }
 
+// Status/Source/API type get header filters (client-side, over whatever's
+// already loaded for the current time range + search); Started at/Duration/
+// Query preview don't -- a date range and a numeric range aren't a checkbox
+// list, and Query preview is free text the search box above already covers
+// server-side.
+const QUERY_COLUMNS = [
+  { key: 'status', label: 'Status', filterValue: (r) => r.status },
+  { key: 'startedAt', label: 'Started at' },
+  { key: 'durationMs', label: 'Duration' },
+  { key: 'source', label: 'Source', filterValue: (r) => sourceKey(r), formatValue: (v) => SOURCE_LABELS[v] },
+  { key: 'apiType', label: 'API type', filterValue: (r) => r.apiType || '(none)' },
+  { key: 'queryJson', label: 'Query preview' },
+];
+
+let queryColumnFilters = { status: new Set(), source: new Set(), apiType: new Set() };
+let queryFilterUi = { openKey: null, search: '' };
+let queryAllRows = [];
+
 function renderQueryTable(rows) {
+  queryAllRows = rows;
+  renderQueryTableFiltered();
+}
+
+function renderQueryTableFiltered() {
   const host = document.getElementById('query-table-host');
   host.innerHTML = '';
-  if (!rows.length) {
+  renderColumnFilterSummary('query-filter-summary-host', queryColumnFilters, renderQueryTableFiltered);
+
+  if (!queryAllRows.length) {
     host.append(el('div', { class: 'muted' }, ['No queries recorded yet.']));
     return;
   }
-  const thead = el('tr', null, [
-    el('th', null, ['Status']),
-    el('th', null, ['Started at']),
-    el('th', null, ['Duration']),
-    el('th', null, ['Source']),
-    el('th', null, ['API type']),
-    el('th', null, ['Query preview']),
-  ]);
+  const rows = queryAllRows.filter(r => rowMatchesColumnFilters(r, QUERY_COLUMNS, queryColumnFilters));
+  if (!rows.length) {
+    host.append(el('div', { class: 'muted' }, ['No queries match the current filters.']));
+    return;
+  }
+
+  const thead = el('tr', null, QUERY_COLUMNS.map(col => {
+    const th = el('th', null, [col.label]);
+    if (col.filterValue) appendColumnFilterUI(th, col, queryAllRows, QUERY_COLUMNS, queryColumnFilters, queryFilterUi, renderQueryTableFiltered);
+    return th;
+  }));
   const tbody = rows.map(row => {
     const preview = el('code', { class: 'query-preview' }, []);
     preview.innerHTML = highlightJson(row.queryJson || '{}', false);
@@ -1358,7 +1564,6 @@ async function loadQueryTable() {
   const host = document.getElementById('query-table-host');
   try {
     const params = new URLSearchParams();
-    if (queryFilterState.status) params.set('status', queryFilterState.status);
     if (queryFilterState.search) params.set('search', queryFilterState.search);
     params.set('sinceMinutes', String(queryTimeRangeMinutes));
     params.set('limit', '200');
