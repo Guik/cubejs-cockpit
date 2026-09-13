@@ -20,5 +20,10 @@ node_modules
 /data
 /.dashboard-data
 
+# Local-only scratch space (e.g. real-data samples pulled from a live
+# deployment for analysis) -- never meant to be committed, this repo is
+# public.
+/tmp/
+
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
