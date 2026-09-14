@@ -205,7 +205,10 @@ export const INDEX_HTML = `<!doctype html>
     <div id="preaggs-history" class="subpanel">
       <h2>Build history</h2>
       <div id="history-info-host"></div>
-      <div id="history-filter-host"></div>
+      <div class="controls-row">
+        <div id="history-filter-host"></div>
+        <div id="history-timerange-host"></div>
+      </div>
       <div id="history-list-host" class="loading">Loading&hellip;</div>
     </div>
   </section>
@@ -809,14 +812,60 @@ let historyFilterState = { preAggId: '', search: '' };
 let historySortState = { key: 'mostRecentBuild', dir: 'desc' };
 let historyAllGroups = []; // [{ preAggId, group }]
 
+// Deliberately its own small preset row, not the shared queryTimeWindow
+// query-history/performance/errors already key off -- rebuilds don't
+// happen every hour the way real query traffic does, so inheriting
+// whatever those tabs last had selected (often "Last 1h") would make an
+// otherwise fully-populated build history look empty by default. Defaults
+// to "All time" instead; narrowing it is opt-in.
+const HISTORY_TIME_RANGES = [
+  { label: 'All time', minutes: null },
+  { label: '24h', minutes: 24 * 60 },
+  { label: '7d', minutes: 7 * 24 * 60 },
+  { label: '30d', minutes: 30 * 24 * 60 },
+];
+let historyTimeRangeMinutes = null;
+
+function renderHistoryTimeRangeBar() {
+  const host = document.getElementById('history-timerange-host');
+  if (!host) return;
+  host.innerHTML = '';
+  const bar = el('div', { class: 'timerange-bar' });
+  for (const range of HISTORY_TIME_RANGES) {
+    const btn = el('button', {}, [range.minutes === null ? range.label : 'Last ' + range.label]);
+    if (range.minutes === historyTimeRangeMinutes) btn.classList.add('active');
+    btn.addEventListener('click', () => {
+      historyTimeRangeMinutes = range.minutes;
+      renderHistoryTimeRangeBar();
+      renderHistoryList();
+    });
+    bar.append(btn);
+  }
+  host.append(bar);
+}
+
+// A row (a partition's whole generation history) matches the time filter
+// if ANY of its generations was built in the window -- "what got rebuilt
+// recently", not "is its most recent build recent" (a partition rebuilt
+// yesterday and again an hour ago should still show up under "last 24h"
+// either way, but this also surfaces one rebuilt only yesterday under a
+// "last 24h" filter if it has an older generation that's since aged out
+// -- vanishingly rare in practice since old generations disappear once
+// they leave updateWindow, per openGenerationsOverlay's comment).
+function matchesHistoryTimeRange(group) {
+  if (historyTimeRangeMinutes === null) return true;
+  const cutoff = Date.now() - historyTimeRangeMinutes * 60 * 1000;
+  return group.generations.some(g => Date.parse(g.createdAt) >= cutoff);
+}
+
 function renderHistoryList() {
   const host = document.getElementById('history-list-host');
   host.innerHTML = '';
 
-  const rows = historyAllGroups.filter(r => matchesFilter(r.preAggId, r.group.logicalName, historyFilterState));
+  const rows = historyAllGroups.filter(r => matchesFilter(r.preAggId, r.group.logicalName, historyFilterState) && matchesHistoryTimeRange(r.group));
 
   if (!rows.length) {
-    host.append(el('div', { class: 'muted' }, [historyAllGroups.length ? 'No partitions match this filter.' : 'No history found.']));
+    host.append(el('div', { class: 'muted' }, [historyAllGroups.length ? 'No partitions match the current filters.' : 'No history found.']));
     return;
   }
 
@@ -1876,6 +1925,7 @@ try {
 loadModelMeta();
 loadModelFiles();
 loadPreAggregations();
+renderHistoryTimeRangeBar();
 loadBuildHistory();
 TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
 ORIGIN_BAR_HOSTS.forEach(renderOriginBar);
