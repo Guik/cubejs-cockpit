@@ -133,6 +133,17 @@ export const INDEX_HTML = `<!doctype html>
   /* Build history tab */
   .info-card { border: 1px solid #23262b; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 13px; line-height: 1.6; }
   .info-card code { color: #cbd5e1; background: #1a1d22; padding: 1px 5px; border-radius: 4px; }
+
+  /* Help tooltip -- a small "?" that reveals longer explanatory text on
+     hover/focus instead of it sitting inline, permanently visible.
+     CSS-only (no open/close state to manage): the content is always in
+     the DOM, just hidden until :hover or :focus, so it also works via
+     keyboard (tab to the icon) without any JS. */
+  .help-tip { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: #1a1d22; border: 1px solid #2c3038; color: #6b7280; font-size: 10px; font-style: normal; font-weight: 600; cursor: help; margin-left: 5px; vertical-align: middle; }
+  .help-tip:hover, .help-tip:focus { color: #fff; border-color: #3b4252; outline: none; }
+  .help-tip-content { visibility: hidden; opacity: 0; position: absolute; bottom: 130%; left: 50%; transform: translateX(-50%); width: 320px; max-width: 70vw; background: #111318; border: 1px solid #23262b; border-radius: 8px; padding: 10px 12px; font-size: 11.5px; line-height: 1.6; color: #9aa4b2; font-weight: 400; text-align: left; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 80; transition: opacity 0.1s; pointer-events: none; }
+  .help-tip:hover .help-tip-content, .help-tip:focus .help-tip-content { visibility: visible; opacity: 1; }
+  .help-tip-content code { color: #cbd5e1; background: #1a1d22; padding: 1px 5px; border-radius: 4px; }
   .gen-list { list-style: none; margin: 0; padding: 0; }
   .gen-list li { padding: 5px 0; border-bottom: 1px solid #1c1f24; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; display: flex; justify-content: space-between; gap: 12px; }
   .gen-list li:last-child { border-bottom: none; }
@@ -280,6 +291,16 @@ function el(tag, attrs, children) {
 
 function errBox(e) {
   return el('div', { class: 'err' }, [String(e.message || e)]);
+}
+
+// A small "?" that reveals longer explanatory text on hover/focus, for
+// text that's genuinely useful but too long to justify sitting inline,
+// permanently visible, every time. tabindex so keyboard users (:focus)
+// can reach it too, not just mouse hover.
+function helpTip(contentChildren) {
+  const tip = el('span', { class: 'help-tip', tabindex: '0' }, ['?']);
+  tip.append(el('span', { class: 'help-tip-content' }, contentChildren));
+  return tip;
 }
 
 function fmtDate(v) {
@@ -906,9 +927,8 @@ async function loadBuildHistory() {
         el('code', null, [rk.every || '?']),
         ', rebuilds partitions within the last ',
         el('code', null, [rk.updateWindow || '?']),
-        ' (updateWindow). ',
-        el('br', null, []),
-        el('span', { class: 'muted' }, [
+        ' (updateWindow).',
+        helpTip([
           'To change updateWindow: edit refreshKey.updateWindow for this pre-aggregation in schema/*.js and redeploy. ',
           'It only affects which recent partitions keep getting incrementally rebuilt (and how long their build history stays visible here) \\u2014 ',
           'it does not rebuild anything retroactively, does not extend history for already-settled older partitions, and widening it means more freshness checks against the source DB.',
