@@ -28,6 +28,7 @@ export const INDEX_HTML = `<!doctype html>
   .subnav { display: flex; gap: 4px; border-bottom: 1px solid #23262b; margin-bottom: 16px; }
   .subnav button { background: none; border: none; color: #9aa4b2; padding: 8px 4px; margin-right: 16px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; }
   .subnav button.active { color: #fff; border-bottom-color: #4ade80; }
+  .controls-row { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px; }
   .timerange-bar { display: flex; gap: 6px; margin-bottom: 16px; position: relative; }
   .timerange-bar button { background: #111318; border: 1px solid #23262b; color: #9aa4b2; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   .timerange-bar button:hover { border-color: #3b4252; }
@@ -209,8 +210,10 @@ export const INDEX_HTML = `<!doctype html>
     </div>
   </section>
   <section id="queries">
-    <div id="query-timerange-host"></div>
-    <div id="query-origin-host"></div>
+    <div class="controls-row">
+      <div id="query-origin-host"></div>
+      <div id="query-timerange-host"></div>
+    </div>
     <h2>Query volume &amp; duration</h2>
     <div id="query-charts-host" class="loading">Loading&hellip;</div>
     <h2>Queries</h2>
@@ -219,8 +222,10 @@ export const INDEX_HTML = `<!doctype html>
     <div id="query-table-host" class="loading">Loading&hellip;</div>
   </section>
   <section id="performance">
-    <div id="perf-timerange-host"></div>
-    <div id="perf-origin-host"></div>
+    <div class="controls-row">
+      <div id="perf-origin-host"></div>
+      <div id="perf-timerange-host"></div>
+    </div>
     <h2>Cache &amp; pre-aggregation performance</h2>
     <div id="perf-charts-host" class="loading">Loading&hellip;</div>
     <h2>Request mix &amp; cache freshness</h2>
