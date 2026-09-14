@@ -28,10 +28,19 @@ export const INDEX_HTML = `<!doctype html>
   .subnav { display: flex; gap: 4px; border-bottom: 1px solid #23262b; margin-bottom: 16px; }
   .subnav button { background: none; border: none; color: #9aa4b2; padding: 8px 4px; margin-right: 16px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; }
   .subnav button.active { color: #fff; border-bottom-color: #4ade80; }
-  .timerange-bar { display: flex; gap: 6px; margin-bottom: 16px; }
+  .timerange-bar { display: flex; gap: 6px; margin-bottom: 16px; position: relative; }
   .timerange-bar button { background: #111318; border: 1px solid #23262b; color: #9aa4b2; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   .timerange-bar button:hover { border-color: #3b4252; }
   .timerange-bar button.active { background: #1a1d22; color: #fff; border-color: #4ade80; }
+  .timerange-popover { position: absolute; top: 100%; right: 0; margin-top: 6px; z-index: 60; background: #111318; border: 1px solid #23262b; border-radius: 8px; padding: 12px; min-width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .timerange-popover-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: #6b7280; margin: 0 0 6px; }
+  .timerange-extra-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .timerange-custom-fields { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .timerange-custom-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #9aa4b2; }
+  .timerange-custom-fields input[type="datetime-local"] { background: #0b0d10; border: 1px solid #23262b; color: #e6e6e6; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .timerange-popover-error { color: #f87171; font-size: 11px; margin: -4px 0 8px; }
+  .timerange-popover-apply { width: 100%; background: #123a20; border: 1px solid #4ade80; color: #4ade80; border-radius: 6px; padding: 6px 0; font-size: 12px; cursor: pointer; }
+  .timerange-popover-apply:hover { background: #164a28; }
   .subpanel { display: none; }
   .subpanel.active { display: block; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
@@ -1117,34 +1126,73 @@ function renderMultiLineChart(host, buckets, seriesKeys, colorMap, labelMap, for
 }
 
 // --- Time range selector (drives both the charts and the table below) ---
+//
+// Two shapes share one state object -- { mode: 'relative', minutes } for
+// every preset button ("last N minutes/hours/days"), or { mode: 'absolute',
+// from, to } (ISO strings) for the custom range picker. Exactly one is
+// ever active; timeWindowQuery() is the one place that turns whichever it
+// is into the query-string fragment every fetch call below appends.
 
 const TIME_RANGES = [
   { label: '5m', minutes: 5 },
-  { label: '15m', minutes: 15 },
   { label: '1h', minutes: 60 },
-  { label: '6h', minutes: 6 * 60 },
   { label: '24h', minutes: 24 * 60 },
   { label: '7d', minutes: 7 * 24 * 60 },
 ];
 
-function loadStoredTimeRangeMinutes() {
+// Not important enough for the always-visible row, but one click away
+// inside the custom-range popover -- the two gaps trimming TIME_RANGES
+// left (15m, 6h), plus two longer look-backs that actually reach into
+// what QUERY_HISTORY_RETENTION_DAYS (30 by default) keeps -- nothing in
+// the main row reached past 7d before.
+const EXTRA_TIME_RANGES = [
+  { label: '15m', minutes: 15 },
+  { label: '6h', minutes: 6 * 60 },
+  { label: '14d', minutes: 14 * 24 * 60 },
+  { label: '30d', minutes: 30 * 24 * 60 },
+];
+
+function loadStoredTimeWindow() {
   try {
-    const stored = Number(localStorage.getItem('qh-timerange-minutes'));
-    if (TIME_RANGES.some(r => r.minutes === stored)) return stored;
-  } catch (e) { /* localStorage unavailable (private browsing, etc.) -- fall through to default */ }
-  return 60;
+    const stored = JSON.parse(localStorage.getItem('qh-timewindow') || 'null');
+    if (stored && stored.mode === 'relative' && typeof stored.minutes === 'number') return stored;
+    if (stored && stored.mode === 'absolute' && stored.from && stored.to) return stored;
+  } catch (e) { /* malformed/unavailable storage -- fall through to default */ }
+  return { mode: 'relative', minutes: 60 };
 }
 
-let queryTimeRangeMinutes = loadStoredTimeRangeMinutes();
+function saveTimeWindow(window) {
+  try { localStorage.setItem('qh-timewindow', JSON.stringify(window)); } catch (e) { /* ignore */ }
+}
+
+let queryTimeWindow = loadStoredTimeWindow();
+
+function timeWindowQuery() {
+  return queryTimeWindow.mode === 'absolute'
+    ? 'from=' + encodeURIComponent(queryTimeWindow.from) + '&to=' + encodeURIComponent(queryTimeWindow.to)
+    : 'sinceMinutes=' + queryTimeWindow.minutes;
+}
+
+function applyTimeWindowToParams(params) {
+  if (queryTimeWindow.mode === 'absolute') {
+    params.set('from', queryTimeWindow.from);
+    params.set('to', queryTimeWindow.to);
+  } else {
+    params.set('sinceMinutes', String(queryTimeWindow.minutes));
+  }
+}
 
 function currentRangeLabel() {
-  const match = TIME_RANGES.find(r => r.minutes === queryTimeRangeMinutes);
-  return match ? match.label : (queryTimeRangeMinutes + 'm');
+  if (queryTimeWindow.mode === 'absolute') {
+    return fmtDate(queryTimeWindow.from) + ' \\u2013 ' + fmtDate(queryTimeWindow.to);
+  }
+  const match = TIME_RANGES.concat(EXTRA_TIME_RANGES).find(r => r.minutes === queryTimeWindow.minutes);
+  return match ? match.label : (queryTimeWindow.minutes + 'm');
 }
 
 // Shared across tabs (query history, performance, and errors all key off
-// the same queryTimeRangeMinutes): each renders its own bar into its own
-// host, but a click on any of them re-renders every bar and re-fires every
+// the same queryTimeWindow): each renders its own bar into its own host,
+// but a click on any of them re-renders every bar and re-fires every
 // registered loader, rather than each tab keeping an independent range.
 const TIME_RANGE_BAR_HOSTS = ['query-timerange-host', 'perf-timerange-host', 'errors-timerange-host'];
 const TIME_RANGE_LISTENERS = [];
@@ -1153,22 +1201,120 @@ function onTimeRangeChange(fn) {
   TIME_RANGE_LISTENERS.push(fn);
 }
 
+// Only one custom-range popover is ever meaningfully visible at a time
+// (the three bars live in three different tab sections, only one of
+// which is ever displayed), so a single shared open/closed flag is
+// enough -- no need to track which host's button triggered it.
+let customRangeUi = { open: false };
+
+function applyTimeWindow(window) {
+  queryTimeWindow = window;
+  saveTimeWindow(window);
+  customRangeUi.open = false;
+  TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+  TIME_RANGE_LISTENERS.forEach(fn => fn());
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.timerange-popover') || e.target.closest('.timerange-custom-btn')) return;
+  if (!customRangeUi.open) return;
+  customRangeUi.open = false;
+  TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !customRangeUi.open) return;
+  customRangeUi.open = false;
+  TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+});
+
+// Local (not UTC) "YYYY-MM-DDTHH:mm" -- what <input type="datetime-local">
+// both reads and writes, so a previously-applied absolute window round-
+// trips back into the fields showing exactly what was picked, in the
+// viewer's own timezone rather than UTC.
+function toDatetimeLocalValue(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 function renderTimeRangeBar(hostId) {
   const host = document.getElementById(hostId);
   if (!host) return;
   host.innerHTML = '';
   const bar = el('div', { class: 'timerange-bar' });
+
   for (const range of TIME_RANGES) {
     const btn = el('button', {}, ['Last ' + range.label]);
-    if (range.minutes === queryTimeRangeMinutes) btn.classList.add('active');
-    btn.addEventListener('click', () => {
-      queryTimeRangeMinutes = range.minutes;
-      try { localStorage.setItem('qh-timerange-minutes', String(range.minutes)); } catch (e) { /* ignore */ }
-      TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
-      TIME_RANGE_LISTENERS.forEach(fn => fn());
-    });
+    if (queryTimeWindow.mode === 'relative' && range.minutes === queryTimeWindow.minutes) btn.classList.add('active');
+    btn.addEventListener('click', () => applyTimeWindow({ mode: 'relative', minutes: range.minutes }));
     bar.append(btn);
   }
+
+  // Highlighted (and, for an extra preset specifically, relabeled to show
+  // which one) whenever the active window isn't one of the main-row
+  // buttons above -- otherwise picking "15m" from the popover would leave
+  // no visible indication anywhere in the collapsed bar of what's active.
+  const isMainPreset = queryTimeWindow.mode === 'relative' && TIME_RANGES.some(r => r.minutes === queryTimeWindow.minutes);
+  const customBtn = el('button', { class: 'timerange-custom-btn' }, [isMainPreset ? 'Custom\\u2026' : (queryTimeWindow.mode === 'relative' ? currentRangeLabel() : 'Custom\\u2026')]);
+  if (!isMainPreset) customBtn.classList.add('active');
+  customBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    customRangeUi.open = !customRangeUi.open;
+    TIME_RANGE_BAR_HOSTS.forEach(renderTimeRangeBar);
+  });
+  bar.append(customBtn);
+
+  if (customRangeUi.open) {
+    const pop = el('div', { class: 'timerange-popover' });
+    // Nothing inside the popover should ever reach the outside-click
+    // listener above, or a click on a preset/Apply button would
+    // immediately be treated as "clicked outside" and close it again.
+    pop.addEventListener('click', (e) => e.stopPropagation());
+
+    pop.append(el('div', { class: 'timerange-popover-label' }, ['More presets']));
+    const extraRow = el('div', { class: 'timerange-extra-presets' });
+    for (const range of EXTRA_TIME_RANGES) {
+      const btn = el('button', {}, [range.label]);
+      if (queryTimeWindow.mode === 'relative' && range.minutes === queryTimeWindow.minutes) btn.classList.add('active');
+      btn.addEventListener('click', () => applyTimeWindow({ mode: 'relative', minutes: range.minutes }));
+      extraRow.append(btn);
+    }
+    pop.append(extraRow);
+
+    pop.append(el('div', { class: 'timerange-popover-label' }, ['Custom range']));
+    const defaultFrom = queryTimeWindow.mode === 'absolute' ? queryTimeWindow.from : new Date(Date.now() - 3_600_000).toISOString();
+    const defaultTo = queryTimeWindow.mode === 'absolute' ? queryTimeWindow.to : new Date().toISOString();
+    const fromInput = el('input', { type: 'datetime-local' });
+    fromInput.value = toDatetimeLocalValue(defaultFrom);
+    const toInput = el('input', { type: 'datetime-local' });
+    toInput.value = toDatetimeLocalValue(defaultTo);
+    pop.append(el('div', { class: 'timerange-custom-fields' }, [
+      el('label', null, ['From', fromInput]),
+      el('label', null, ['To', toInput]),
+    ]));
+
+    const errorHost = el('div', { class: 'timerange-popover-error' }, []);
+    pop.append(errorHost);
+
+    const applyBtn = el('button', { type: 'button', class: 'timerange-popover-apply' }, ['Apply']);
+    applyBtn.addEventListener('click', () => {
+      const fromMs = fromInput.value ? new Date(fromInput.value).getTime() : NaN;
+      const toMs = toInput.value ? new Date(toInput.value).getTime() : NaN;
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) {
+        errorHost.textContent = 'Pick both a start and an end.';
+        return;
+      }
+      if (toMs <= fromMs) {
+        errorHost.textContent = '"To" must be after "From".';
+        return;
+      }
+      applyTimeWindow({ mode: 'absolute', from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() });
+    });
+    pop.append(applyBtn);
+
+    bar.append(pop);
+  }
+
   host.append(bar);
 }
 
@@ -1227,7 +1373,7 @@ function renderOriginBar(hostId) {
 async function loadQueryCharts() {
   const host = document.getElementById('query-charts-host');
   try {
-    const data = await getJSON('/api/query-history/stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState);
+    const data = await getJSON('/api/query-history/stats?' + timeWindowQuery() + '&origin=' + queryOriginState);
     const buckets = data.buckets || [];
     destroyChartsIn(host);
     host.innerHTML = '';
@@ -1254,8 +1400,8 @@ async function loadPerformanceCharts() {
   const compileHost = document.getElementById('perf-compile-charts-host');
   try {
     const [cacheData, compileData] = await Promise.all([
-      getJSON('/api/query-history/cache-stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState),
-      getJSON('/api/performance/compile-stats?sinceMinutes=' + queryTimeRangeMinutes),
+      getJSON('/api/query-history/cache-stats?' + timeWindowQuery() + '&origin=' + queryOriginState),
+      getJSON('/api/performance/compile-stats?' + timeWindowQuery()),
     ]);
 
     const cacheBuckets = pivotCacheBuckets(cacheData.buckets || []);
@@ -1313,8 +1459,8 @@ async function loadPerformanceMixCharts() {
   const host = document.getElementById('perf-mix-charts-host');
   try {
     const [apiTypeData, staleData] = await Promise.all([
-      getJSON('/api/query-history/api-type-stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState),
-      getJSON('/api/query-history/stale-cache-stats?sinceMinutes=' + queryTimeRangeMinutes + '&origin=' + queryOriginState),
+      getJSON('/api/query-history/api-type-stats?' + timeWindowQuery() + '&origin=' + queryOriginState),
+      getJSON('/api/query-history/stale-cache-stats?' + timeWindowQuery() + '&origin=' + queryOriginState),
     ]);
 
     const apiTypeBuckets = pivotApiTypeBuckets(apiTypeData.buckets || []);
@@ -1370,7 +1516,7 @@ function pivotErrorBuckets(rows) {
 async function loadErrorCharts() {
   const host = document.getElementById('errors-chart-host');
   try {
-    const data = await getJSON('/api/performance/error-stats?sinceMinutes=' + queryTimeRangeMinutes);
+    const data = await getJSON('/api/performance/error-stats?' + timeWindowQuery());
     const buckets = pivotErrorBuckets(data.buckets || []);
     destroyChartsIn(host);
     host.innerHTML = '';
@@ -1419,7 +1565,7 @@ function renderErrorsList(rows) {
 async function loadRecentErrors() {
   const host = document.getElementById('errors-list-host');
   try {
-    const data = await getJSON('/api/performance/recent-errors?sinceMinutes=' + queryTimeRangeMinutes);
+    const data = await getJSON('/api/performance/recent-errors?' + timeWindowQuery());
     renderErrorsList(data.errors || []);
   } catch (e) {
     host.innerHTML = '';
@@ -1671,7 +1817,7 @@ async function loadQueryTable() {
   try {
     const params = new URLSearchParams();
     if (queryFilterState.search) params.set('search', queryFilterState.search);
-    params.set('sinceMinutes', String(queryTimeRangeMinutes));
+    applyTimeWindowToParams(params);
     params.set('origin', queryOriginState);
     params.set('limit', '200');
     const data = await getJSON('/api/query-history?' + params.toString());

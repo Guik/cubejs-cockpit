@@ -320,6 +320,8 @@ export interface ListParams {
   status?: string;
   search?: string;
   sinceMinutes?: number;
+  from?: string;
+  to?: string;
   limit?: number;
   offset?: number;
   origin?: QueryOrigin;
@@ -337,9 +339,10 @@ export function listEvents(params: ListParams): { rows: QueryEventRow[]; total: 
     clauses.push("query_json LIKE ?");
     args.push(`%${params.search}%`);
   }
-  if (params.sinceMinutes) {
-    clauses.push("completed_at >= ?");
-    args.push(new Date(Date.now() - params.sinceMinutes * 60 * 1000).toISOString());
+  if (params.sinceMinutes || (params.from && params.to)) {
+    const { sinceIso, untilIso } = resolveTimeWindow(params);
+    clauses.push("completed_at >= ? AND completed_at <= ?");
+    args.push(sinceIso, untilIso);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const limit = Math.min(Math.max(params.limit ?? 200, 1), 1000);
@@ -366,19 +369,51 @@ export interface StatsBucket {
 // show one or two bars total; the reverse (1-minute buckets over 7 days)
 // would be thousands of bars. Picked so a full range renders as roughly
 // 15-40 bars regardless of which preset is selected.
-function bucketSecondsFor(sinceMinutes: number): number {
-  if (sinceMinutes <= 15) return 60; // 1 minute
-  if (sinceMinutes <= 60) return 2 * 60; // 2 minutes
-  if (sinceMinutes <= 6 * 60) return 15 * 60; // 15 minutes
-  if (sinceMinutes <= 24 * 60) return 60 * 60; // 1 hour
-  if (sinceMinutes <= 7 * 24 * 60) return 6 * 60 * 60; // 6 hours
+function bucketSecondsFor(minutes: number): number {
+  if (minutes <= 15) return 60; // 1 minute
+  if (minutes <= 60) return 2 * 60; // 2 minutes
+  if (minutes <= 6 * 60) return 15 * 60; // 15 minutes
+  if (minutes <= 24 * 60) return 60 * 60; // 1 hour
+  if (minutes <= 7 * 24 * 60) return 6 * 60 * 60; // 6 hours
   return 24 * 60 * 60; // 1 day
 }
 
-export function statsBuckets(sinceMinutes: number, origin?: QueryOrigin): StatsBucket[] {
+export interface TimeWindow {
+  // Relative ("last N minutes", every preset button) -- ignored when
+  // from/to are both given.
+  sinceMinutes?: number;
+  // Absolute (the custom range picker) -- an ISO datetime pair, inclusive
+  // of both ends. Takes priority over sinceMinutes when both are present,
+  // since the frontend always sends exactly one of the two shapes.
+  from?: string;
+  to?: string;
+}
+
+// Every bucket query needs the same three things regardless of which kind
+// of window it got: an ISO lower bound, an ISO upper bound (the relative
+// case's is just "now" -- rows can't have a future completed_at, but an
+// absolute custom range genuinely needs one, or it'd include everything
+// from "from" up to the present instead of stopping at "to"), and a
+// bucket width picked so the window renders as roughly 15-40 bars either
+// way (see bucketSecondsFor).
+function resolveTimeWindow(window: TimeWindow): { sinceIso: string; untilIso: string; bucketSeconds: number } {
+  if (window.from && window.to) {
+    const fromMs = Date.parse(window.from);
+    const toMs = Date.parse(window.to);
+    const minutes = Math.max(1, (toMs - fromMs) / 60_000);
+    return { sinceIso: new Date(fromMs).toISOString(), untilIso: new Date(toMs).toISOString(), bucketSeconds: bucketSecondsFor(minutes) };
+  }
+  const minutes = window.sinceMinutes ?? 60;
+  return {
+    sinceIso: new Date(Date.now() - minutes * 60 * 1000).toISOString(),
+    untilIso: new Date().toISOString(),
+    bucketSeconds: bucketSecondsFor(minutes),
+  };
+}
+
+export function statsBuckets(window: TimeWindow, origin?: QueryOrigin): StatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  const { sinceIso, untilIso, bucketSeconds } = resolveTimeWindow(window);
   // Groups rows into fixed-width time buckets by integer-dividing the unix
   // timestamp, rather than strftime('%H:00', ...) (hour-string formatting,
   // which can only ever produce hour-wide buckets) -- this works uniformly
@@ -397,11 +432,11 @@ export function statsBuckets(sinceMinutes: number, origin?: QueryOrigin): StatsB
          AVG(duration_ms) as avgDurationMs,
          SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount
        FROM query_events
-       WHERE completed_at >= ? AND ${originClause(origin)}
+       WHERE completed_at >= ? AND completed_at <= ? AND ${originClause(origin)}
        GROUP BY bucket
        ORDER BY bucket ASC`
     )
-    .all(bucketSeconds, bucketSeconds, since) as unknown as StatsBucket[];
+    .all(bucketSeconds, bucketSeconds, sinceIso, untilIso) as unknown as StatsBucket[];
 }
 
 export interface CacheStatsBucket {
@@ -417,10 +452,9 @@ export interface CacheStatsBucket {
 // than lumped into a synthetic "unknown" series: they were never actually
 // classified into any of the four real tiers, so charting them as a tier
 // would misrepresent what's genuinely known.
-export function cacheStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): CacheStatsBucket[] {
+export function cacheStatsBuckets(window: TimeWindow, origin?: QueryOrigin): CacheStatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  const { sinceIso, untilIso, bucketSeconds } = resolveTimeWindow(window);
   return database
     .prepare(
       `SELECT
@@ -429,11 +463,11 @@ export function cacheStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): C
          COUNT(*) as count,
          AVG(duration_ms) as avgDurationMs
        FROM query_events
-       WHERE completed_at >= ? AND cache_type IS NOT NULL AND ${originClause(origin)}
+       WHERE completed_at >= ? AND completed_at <= ? AND cache_type IS NOT NULL AND ${originClause(origin)}
        GROUP BY bucket, cacheType
        ORDER BY bucket ASC`
     )
-    .all(bucketSeconds, bucketSeconds, since) as unknown as CacheStatsBucket[];
+    .all(bucketSeconds, bucketSeconds, sinceIso, untilIso) as unknown as CacheStatsBucket[];
 }
 
 export interface ApiTypeStatsBucket {
@@ -446,10 +480,9 @@ export interface ApiTypeStatsBucket {
 // api_type (rest/sql/graphql/... -- whatever this Cube instance actually
 // serves) instead. Excludes NULL api_type the same way and for the same
 // reason as cache_type above.
-export function apiTypeStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): ApiTypeStatsBucket[] {
+export function apiTypeStatsBuckets(window: TimeWindow, origin?: QueryOrigin): ApiTypeStatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  const { sinceIso, untilIso, bucketSeconds } = resolveTimeWindow(window);
   return database
     .prepare(
       `SELECT
@@ -457,11 +490,11 @@ export function apiTypeStatsBuckets(sinceMinutes: number, origin?: QueryOrigin):
          api_type as apiType,
          COUNT(*) as count
        FROM query_events
-       WHERE completed_at >= ? AND api_type IS NOT NULL AND ${originClause(origin)}
+       WHERE completed_at >= ? AND completed_at <= ? AND api_type IS NOT NULL AND ${originClause(origin)}
        GROUP BY bucket, apiType
        ORDER BY bucket ASC`
     )
-    .all(bucketSeconds, bucketSeconds, since) as unknown as ApiTypeStatsBucket[];
+    .all(bucketSeconds, bucketSeconds, sinceIso, untilIso) as unknown as ApiTypeStatsBucket[];
 }
 
 export interface StaleCacheStatsBucket {
@@ -475,10 +508,9 @@ export interface StaleCacheStatsBucket {
 // window (not just successes) so the rate reflects "how often did Cube
 // serve stale data" against the full traffic it saw, not a cherry-picked
 // denominator.
-export function staleCacheStatsBuckets(sinceMinutes: number, origin?: QueryOrigin): StaleCacheStatsBucket[] {
+export function staleCacheStatsBuckets(window: TimeWindow, origin?: QueryOrigin): StaleCacheStatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  const { sinceIso, untilIso, bucketSeconds } = resolveTimeWindow(window);
   return database
     .prepare(
       `SELECT
@@ -486,9 +518,9 @@ export function staleCacheStatsBuckets(sinceMinutes: number, origin?: QueryOrigi
          COUNT(*) as total,
          SUM(served_stale_cache) as staleCount
        FROM query_events
-       WHERE completed_at >= ? AND ${originClause(origin)}
+       WHERE completed_at >= ? AND completed_at <= ? AND ${originClause(origin)}
        GROUP BY bucket
        ORDER BY bucket ASC`
     )
-    .all(bucketSeconds, bucketSeconds, since) as unknown as StaleCacheStatsBucket[];
+    .all(bucketSeconds, bucketSeconds, sinceIso, untilIso) as unknown as StaleCacheStatsBucket[];
 }

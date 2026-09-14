@@ -7,10 +7,21 @@ import {
   errorStatsBuckets,
   ErrorIngestEvent,
   recentErrors,
+  TimeWindow,
 } from "./db";
 
 // api.raw, matching queryhistory/api.ts's established pattern in this
 // project (see its header comment for why).
+
+// Same shape/precedence as queryhistory/api.ts's parseTimeWindow: the
+// custom range picker sends from+to, every preset button sends
+// sinceMinutes, and from+to wins if both somehow show up.
+function parseTimeWindow(url: URL): TimeWindow {
+  const from = url.searchParams.get("from") || undefined;
+  const to = url.searchParams.get("to") || undefined;
+  if (from && to) return { from, to };
+  return { sinceMinutes: url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60 };
+}
 
 function sendJson(resp: Parameters<Parameters<typeof api.raw>[1]>[1], status: number, body: unknown) {
   resp.writeHead(status, { "Content-Type": "application/json" });
@@ -43,8 +54,7 @@ export const compileStats = api.raw(
   { expose: true, method: "GET", path: "/api/performance/compile-stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: compileStatsBuckets(sinceMinutes) });
+    sendJson(resp, 200, { buckets: compileStatsBuckets(parseTimeWindow(url)) });
   }
 );
 
@@ -68,8 +78,7 @@ export const errorStats = api.raw(
   { expose: true, method: "GET", path: "/api/performance/error-stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: errorStatsBuckets(sinceMinutes) });
+    sendJson(resp, 200, { buckets: errorStatsBuckets(parseTimeWindow(url)) });
   }
 );
 
@@ -79,7 +88,6 @@ export const recentErrorsList = api.raw(
   { expose: true, method: "GET", path: "/api/performance/recent-errors" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { errors: recentErrors(sinceMinutes) });
+    sendJson(resp, 200, { errors: recentErrors(parseTimeWindow(url)) });
   }
 );

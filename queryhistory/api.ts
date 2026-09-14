@@ -8,6 +8,7 @@ import {
   staleCacheStatsBuckets,
   IngestEvent,
   QueryOrigin,
+  TimeWindow,
 } from "./db";
 
 // Shared by every read endpoint below -- see originClause's comment in
@@ -17,6 +18,18 @@ import {
 function parseOrigin(url: URL): QueryOrigin | undefined {
   const raw = url.searchParams.get("origin");
   return raw === "internal" || raw === "all" ? raw : undefined;
+}
+
+// The custom range picker sends from+to (an absolute ISO pair); every
+// preset button sends sinceMinutes. from+to takes priority when both
+// somehow show up -- see resolveTimeWindow in db.ts. Defaults to the last
+// hour only when the caller specifies neither, same as every one of these
+// endpoints already defaulted to before the custom picker existed.
+function parseTimeWindow(url: URL): TimeWindow {
+  const from = url.searchParams.get("from") || undefined;
+  const to = url.searchParams.get("to") || undefined;
+  if (from && to) return { from, to };
+  return { sinceMinutes: url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60 };
 }
 
 // api.raw throughout, matching preaggregations/api.ts's established
@@ -62,7 +75,12 @@ export const list = api.raw(
     const params = {
       status: url.searchParams.get("status") || undefined,
       search: url.searchParams.get("search") || undefined,
+      // Unlike the stats endpoints below, list has always left the time
+      // window off entirely (all-time) when the caller doesn't ask for
+      // one -- preserved here rather than defaulting to the last hour.
       sinceMinutes: url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : undefined,
+      from: url.searchParams.get("from") || undefined,
+      to: url.searchParams.get("to") || undefined,
       limit: url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined,
       offset: url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : undefined,
       origin: parseOrigin(url),
@@ -75,8 +93,7 @@ export const stats = api.raw(
   { expose: true, method: "GET", path: "/api/query-history/stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: statsBuckets(sinceMinutes, parseOrigin(url)) });
+    sendJson(resp, 200, { buckets: statsBuckets(parseTimeWindow(url), parseOrigin(url)) });
   }
 );
 
@@ -84,8 +101,7 @@ export const cacheStats = api.raw(
   { expose: true, method: "GET", path: "/api/query-history/cache-stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: cacheStatsBuckets(sinceMinutes, parseOrigin(url)) });
+    sendJson(resp, 200, { buckets: cacheStatsBuckets(parseTimeWindow(url), parseOrigin(url)) });
   }
 );
 
@@ -93,8 +109,7 @@ export const apiTypeStats = api.raw(
   { expose: true, method: "GET", path: "/api/query-history/api-type-stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: apiTypeStatsBuckets(sinceMinutes, parseOrigin(url)) });
+    sendJson(resp, 200, { buckets: apiTypeStatsBuckets(parseTimeWindow(url), parseOrigin(url)) });
   }
 );
 
@@ -102,7 +117,6 @@ export const staleCacheStats = api.raw(
   { expose: true, method: "GET", path: "/api/query-history/stale-cache-stats" },
   async (req, resp) => {
     const url = new URL(req.url || "", "http://internal");
-    const sinceMinutes = url.searchParams.has("sinceMinutes") ? Number(url.searchParams.get("sinceMinutes")) : 60;
-    sendJson(resp, 200, { buckets: staleCacheStatsBuckets(sinceMinutes, parseOrigin(url)) });
+    sendJson(resp, 200, { buckets: staleCacheStatsBuckets(parseTimeWindow(url), parseOrigin(url)) });
   }
 );

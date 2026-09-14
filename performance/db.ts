@@ -93,19 +93,44 @@ export interface CompileStatsBucket {
 // Same adaptive bucket width as dashboard/queryhistory/db.ts's
 // bucketSecondsFor -- deliberately kept as its own copy (four lines) rather
 // than a shared module for one function used by two independent services.
-function bucketSecondsFor(sinceMinutes: number): number {
-  if (sinceMinutes <= 15) return 60;
-  if (sinceMinutes <= 60) return 2 * 60;
-  if (sinceMinutes <= 6 * 60) return 15 * 60;
-  if (sinceMinutes <= 24 * 60) return 60 * 60;
-  if (sinceMinutes <= 7 * 24 * 60) return 6 * 60 * 60;
+function bucketSecondsFor(minutes: number): number {
+  if (minutes <= 15) return 60;
+  if (minutes <= 60) return 2 * 60;
+  if (minutes <= 6 * 60) return 15 * 60;
+  if (minutes <= 24 * 60) return 60 * 60;
+  if (minutes <= 7 * 24 * 60) return 6 * 60 * 60;
   return 24 * 60 * 60;
 }
 
-export function compileStatsBuckets(sinceMinutes: number): CompileStatsBucket[] {
+// Same TimeWindow/resolveTimeWindow pair as dashboard/queryhistory/db.ts,
+// for the same reason (a relative "last N minutes" preset or an absolute
+// from/to custom range need to resolve to the same {sinceIso, untilIso,
+// bucketSeconds} shape either way) -- kept as its own copy rather than a
+// shared module, same rationale as bucketSecondsFor above.
+export interface TimeWindow {
+  sinceMinutes?: number;
+  from?: string;
+  to?: string;
+}
+
+function resolveTimeWindow(window: TimeWindow): { sinceIso: string; untilIso: string; bucketSeconds: number } {
+  if (window.from && window.to) {
+    const fromMs = Date.parse(window.from);
+    const toMs = Date.parse(window.to);
+    const minutes = Math.max(1, (toMs - fromMs) / 60_000);
+    return { sinceIso: new Date(fromMs).toISOString(), untilIso: new Date(toMs).toISOString(), bucketSeconds: bucketSecondsFor(minutes) };
+  }
+  const minutes = window.sinceMinutes ?? 60;
+  return {
+    sinceIso: new Date(Date.now() - minutes * 60 * 1000).toISOString(),
+    untilIso: new Date().toISOString(),
+    bucketSeconds: bucketSecondsFor(minutes),
+  };
+}
+
+export function compileStatsBuckets(window: TimeWindow): CompileStatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  const { sinceIso, untilIso, bucketSeconds } = resolveTimeWindow(window);
   return database
     .prepare(
       `SELECT
@@ -114,11 +139,11 @@ export function compileStatsBuckets(sinceMinutes: number): CompileStatsBucket[] 
          AVG(duration_ms) as avgDurationMs,
          SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errorCount
        FROM compile_events
-       WHERE completed_at >= ?
+       WHERE completed_at >= ? AND completed_at <= ?
        GROUP BY bucket
        ORDER BY bucket ASC`
     )
-    .all(bucketSeconds, bucketSeconds, since) as unknown as CompileStatsBucket[];
+    .all(bucketSeconds, bucketSeconds, sinceIso, untilIso) as unknown as CompileStatsBucket[];
 }
 
 export interface ErrorIngestEvent {
@@ -156,10 +181,9 @@ export interface ErrorStatsBucket {
 // One row per (bucket, kind) pair, same shape as queryhistory's
 // cacheStatsBuckets/apiTypeStatsBuckets -- the frontend pivots and charts
 // it the same way, rather than listing individual error rows.
-export function errorStatsBuckets(sinceMinutes: number): ErrorStatsBucket[] {
+export function errorStatsBuckets(window: TimeWindow): ErrorStatsBucket[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
-  const bucketSeconds = bucketSecondsFor(sinceMinutes);
+  const { sinceIso, untilIso, bucketSeconds } = resolveTimeWindow(window);
   return database
     .prepare(
       `SELECT
@@ -167,11 +191,11 @@ export function errorStatsBuckets(sinceMinutes: number): ErrorStatsBucket[] {
          kind,
          COUNT(*) as count
        FROM error_events
-       WHERE occurred_at >= ?
+       WHERE occurred_at >= ? AND occurred_at <= ?
        GROUP BY bucket, kind
        ORDER BY bucket ASC`
     )
-    .all(bucketSeconds, bucketSeconds, since) as unknown as ErrorStatsBucket[];
+    .all(bucketSeconds, bucketSeconds, sinceIso, untilIso) as unknown as ErrorStatsBucket[];
 }
 
 export interface RecentErrorEntry {
@@ -188,21 +212,21 @@ export interface RecentErrorEntry {
 // message. Pulls in failed compile_events too (kind: 'compile') since a
 // broken schema deploy is the same "something's wrong" signal an operator
 // is looking for here, even though it's stored in a separate table.
-export function recentErrors(sinceMinutes: number, limit = 50): RecentErrorEntry[] {
+export function recentErrors(window: TimeWindow, limit = 50): RecentErrorEntry[] {
   const database = getDb();
-  const since = new Date(Date.now() - sinceMinutes * 60 * 1000).toISOString();
+  const { sinceIso, untilIso } = resolveTimeWindow(window);
   return database
     .prepare(
       `SELECT kind, type, request_id as requestId, context, error_message as errorMessage, occurred_at as occurredAt
          FROM error_events
-        WHERE occurred_at >= ?
+        WHERE occurred_at >= ? AND occurred_at <= ?
         UNION ALL
        SELECT 'compile' as kind, 'Compiling schema error' as type, request_id as requestId, NULL as context,
               error_message as errorMessage, completed_at as occurredAt
          FROM compile_events
-        WHERE status = 'error' AND completed_at >= ?
+        WHERE status = 'error' AND completed_at >= ? AND completed_at <= ?
         ORDER BY occurredAt DESC
         LIMIT ?`
     )
-    .all(since, since, limit) as unknown as RecentErrorEntry[];
+    .all(sinceIso, untilIso, sinceIso, untilIso, limit) as unknown as RecentErrorEntry[];
 }

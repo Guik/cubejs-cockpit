@@ -259,6 +259,15 @@ glance, and its near-constant ~5000ms duration otherwise skews every
 duration/count aggregate it lands in). The dashboard's own Query
 history/Performance tabs default to `user`, with a toggle to switch.
 
+Every one of the time-bucketed endpoints above (query-history's `stats`/
+`cache-stats`/`api-type-stats`/`stale-cache-stats`, performance's
+`compile-stats`/`error-stats`/`recent-errors`, plus `query-history` list)
+takes either `sinceMinutes` (relative to now -- what every preset button
+sends) or an explicit `from`/`to` ISO datetime pair (what the dashboard's
+own custom-range picker sends); `from`/`to` wins if both are somehow
+given. Bucket width auto-scales to whichever window's actual duration is,
+same as it always has for `sinceMinutes`.
+
 ### Running locally
 
 Requires Node 22.5+ (for the built-in `node:sqlite` module) and the
