@@ -7,8 +7,10 @@ Self-hosted operations dashboard for a Cube.js / Cube Core deployment.
 - **Live data model** -- the cube/measure/dimension metadata and raw
   schema source actually running, not just what a schema file is assumed
   to say.
-- **Pre-aggregation status & build history** -- partition status and
-  rebuild timeline read straight from Cube Store.
+- **Pre-aggregation status & build history** -- partition status, live
+  row counts, and rebuild timeline read straight from Cube Store, plus a
+  one-click targeted rebuild per partition and a day-vs-hour (rollup vs
+  source) integrity check to catch a rollup that silently under-built.
 - **Persistent query history** -- every query with duration, status,
   cache type, and pre-aggregation attribution.
 - **Performance view** -- cache-type breakdown, data model compilation
@@ -231,8 +233,11 @@ it reads plain `process.env` rather than Encore's secrets manager):
 | GET | `/api/model/meta` | Live cube/measure/dimension metadata. |
 | GET | `/api/model/files` | Raw schema source files. |
 | GET | `/api/pre-aggregations` | Pre-aggregation list. |
-| GET | `/api/pre-aggregations/partitions` | Per-partition detail. |
+| GET | `/api/pre-aggregations/partitions` | Per-partition detail, including each partition's live row count from Cube Store (`rowCount`, `null` if the Cube Store lookup fails). |
 | GET | `/api/pre-aggregations/build-history` | Rebuild timeline from Cube Store. |
+| POST | `/api/pre-aggregations/rebuild` | Triggers an async rebuild job for one partition's date range. Body: `{ preAggregationId, dateRange: [start, end], dataSource?, timezone? }`. `dateRange` must be that one partition's own `buildRangeStart`/`buildRangeEnd` (from the `partitions` endpoint above) -- a wider range rebuilds every partition it spans, a real Athena/source scan with real cost. Returns `{ tokens: string[] }`, to poll below. |
+| GET | `/api/pre-aggregations/rebuild-status` | Polls job tokens from `rebuild` above -- `?token=...` (repeatable). Returns `{ statuses: [{ token, table?, status }] }`; treat any `status` starting with `done` or `failure` as terminal, anything else as still in progress. |
+| POST | `/api/pre-aggregations/integrity-check` | Runs the same measures/date range twice through `/cubejs-api/v1/load` -- once at `day` granularity (routes through a covering rollup) and once at `hour` (finer than any rollup this schema defines, so Cube always falls back to source) -- and returns both totals per measure. A mismatch means the rollup is stale or incomplete; this productizes the manual `day` vs `hour` curl comparison described in the plan. Body: `{ measures: string[], timeDimension, dateRange: [start, end], organisationId, userId }` -- all of `measures`/`timeDimension` must be fully-qualified names as returned by `/api/model/meta` (e.g. `"Agg.total"`). **`organisationId` and `userId` are both required, not optional**: this deployment's `queryRewrite` (in the `git_cube` repo's `cube.js`) rejects any query whose security context has either at 0/missing, and unconditionally filters every query to that `organisation_id` -- so the check runs as a specific real tenant, same trust boundary as that tenant's own token, not a `queryRewrite` bypass. Returns `{ results: [{ measure, rollupTotal, sourceTotal }] }`. |
 | POST | `/api/query-history/ingest` | Receives one query-lifecycle event from Cube.js. |
 | GET | `/api/query-history` | Filterable/paginated query list. |
 | GET | `/api/query-history/stats` | Time-bucketed count/duration/error-count. |

@@ -36,10 +36,25 @@ function signJwt(payload: object, secret: string, alg: "HS512" | "HS256"): strin
 
 // Mints a short-lived JWT for the regular /cubejs-api/v1/* endpoints.
 // user_id/organisation_id are required by this project's queryRewrite
-// (cube.js) but /v1/meta doesn't apply row-level filtering, so any valid
-// values work here -- this token is only ever used to ask "what does the
-// data model look like", never to run a real tenant's query.
-export function mintApiToken(ttlSeconds = 300): string {
+// (cube.js, in the sibling git_cube repo) but /v1/meta doesn't apply
+// row-level filtering, so the placeholder 0/0 default works fine there --
+// this is the shape every existing caller (fetchMeta) relies on, never
+// used to run a real tenant's query.
+//
+// securityContext lets a caller mint a token scoped to a REAL tenant
+// instead, for the one caller that actually runs a data query:
+// runIntegrityCheck below. queryRewrite rejects the query outright if
+// either claim is falsy (`!securityContext.user_id` / `!organisation_id`,
+// confirmed by reading cube.js directly) and otherwise unconditionally
+// filters every query to that organisation_id -- so the placeholder
+// would silently compare two empty/wrong result sets rather than the
+// tenant's actual data. Minting with a real context is the same trust
+// boundary as any real end-user token for that org, not a queryRewrite
+// bypass (unlike mintSystemToken below).
+export function mintApiToken(
+  ttlSeconds = 300,
+  securityContext?: { user_id: number; organisation_id: number }
+): string {
   const secret = process.env.CUBEJS_API_SECRET;
   if (!secret) {
     throw new Error("CUBEJS_API_SECRET is not set for the dashboard service");
@@ -51,8 +66,8 @@ export function mintApiToken(ttlSeconds = 300): string {
       iss: "cubejs-cockpit",
       nbf: now,
       exp: now + ttlSeconds,
-      user_id: 0,
-      organisation_id: 0,
+      user_id: securityContext?.user_id ?? 0,
+      organisation_id: securityContext?.organisation_id ?? 0,
     },
     secret,
     "HS512"
@@ -144,4 +159,146 @@ export async function fetchPreAggregationPartitions(): Promise<unknown> {
       },
     },
   });
+}
+
+// Triggers an async rebuild job for one partition's date range via
+// POST /cubejs-api/v1/pre-aggregations/jobs (action: "post") -- NOT
+// /cubejs-system/v1/pre-aggregations/build, which needs a full raw Cube
+// query object and has no polling story of its own. This route is
+// registered under the regular basePath ('/cubejs-api') with
+// userMiddlewares, confirmed live in gateway.js -- NOT systemMiddlewares
+// like every other /cubejs-system/* call in this file -- so it's
+// mintApiToken() here, not mintSystemToken().
+//
+// selector.contexts[].securityContext is required by the endpoint's own
+// Joi schema but doesn't affect which data actually gets built: this
+// project's schema/*.js never references SECURITY_CONTEXT (confirmed:
+// zero matches), tenant filtering only ever happens in queryRewrite at
+// query time. A fixed placeholder context is safe here, same idea as
+// mintApiToken's own placeholder claims below.
+//
+// dateRange must be scoped to the ONE partition being rebuilt (e.g. its
+// own buildRangeStart/buildRangeEnd from fetchPreAggregationPartitions,
+// not the pre-aggregation's full history) -- omitting it rebuilds every
+// partition in range, a real, costly full Athena rescan triggered from
+// what looks like a single row's button.
+export async function triggerPreAggregationBuild(params: {
+  preAggregationId: string;
+  dateRange: [string, string];
+  dataSource?: string;
+  timezone?: string;
+}): Promise<string[]> {
+  const cubeName = params.preAggregationId.split(".")[0];
+  const result = await request("/cubejs-api/v1/pre-aggregations/jobs", {
+    method: "POST",
+    token: mintApiToken(),
+    body: {
+      action: "post",
+      selector: {
+        contexts: [{ securityContext: { user_id: 0, organisation_id: 0 } }],
+        timezones: [params.timezone || "UTC"],
+        dataSources: params.dataSource ? [params.dataSource] : undefined,
+        cubes: [cubeName],
+        preAggregations: [params.preAggregationId],
+        dateRange: params.dateRange,
+      },
+    },
+  });
+  return result as string[];
+}
+
+export interface RebuildJobStatus {
+  token: string;
+  table?: string;
+  status: string;
+}
+
+// Polls previously-triggered job tokens -- same endpoint as
+// triggerPreAggregationBuild, action: "get" instead of "post". `status`
+// is a free-form string from Cube's refresh scheduler/queue (queued/
+// in-progress states, or 'done'/one of the 'failure*' variants once
+// settled) rather than a fixed enum -- confirmed live values aren't
+// exhaustively documented in gateway.js, so callers should treat
+// anything starting with 'done' or 'failure' as terminal and everything
+// else as still in progress, matching gateway.js's own check.
+export async function fetchRebuildJobStatus(tokens: string[]): Promise<RebuildJobStatus[]> {
+  const result = await request("/cubejs-api/v1/pre-aggregations/jobs", {
+    method: "POST",
+    token: mintApiToken(),
+    body: { action: "get", tokens },
+  });
+  return result as RebuildJobStatus[];
+}
+
+// Sums one granularity's worth of results for each measure. Cube's own
+// /v1/load response keys each row by fully-qualified field name
+// ("Cube.measure") and returns measure values as JSON strings for large
+// sums (precision) -- Number() handles both that and the plain-number
+// case. Missing/non-finite values are skipped rather than coerced to 0,
+// so a genuinely absent value doesn't masquerade as a real zero.
+async function loadGranularityTotals(
+  measures: string[],
+  timeDimension: string,
+  dateRange: [string, string],
+  granularity: "day" | "hour",
+  securityContext: { user_id: number; organisation_id: number }
+): Promise<Record<string, number | null>> {
+  const result = (await request("/cubejs-api/v1/load", {
+    method: "POST",
+    token: mintApiToken(300, securityContext),
+    body: {
+      query: {
+        measures,
+        timeDimensions: [{ dimension: timeDimension, granularity, dateRange }],
+      },
+    },
+  })) as { data?: Record<string, string | number | null>[] };
+
+  const totals: Record<string, number | null> = {};
+  for (const m of measures) totals[m] = null;
+  for (const row of result.data || []) {
+    for (const m of measures) {
+      const raw = row[m];
+      if (raw === undefined || raw === null) continue;
+      const n = Number(raw);
+      if (!Number.isFinite(n)) continue;
+      totals[m] = (totals[m] ?? 0) + n;
+    }
+  }
+  return totals;
+}
+
+export interface IntegrityCheckMeasureResult {
+  measure: string;
+  rollupTotal: number | null;
+  sourceTotal: number | null;
+}
+
+// Productizes this week's manual diagnostic (see the plan): the same
+// measures/time dimension/date range/tenant, queried twice through
+// Cube's stable, publicly documented /cubejs-api/v1/load -- 'day'
+// granularity (routes through a covering rollup pre-aggregation when one
+// exists) vs 'hour' (finer than any rollup this schema defines, so Cube
+// always falls back to source). A mismatch between the two totals for
+// the same measure is exactly the silent-failure signal both of this
+// week's incidents needed a manual curl comparison to find.
+//
+// securityContext must be a REAL tenant's {user_id, organisation_id} --
+// see mintApiToken's comment above for why a placeholder would silently
+// compare two empty/wrong result sets instead of real data.
+export async function runIntegrityCheck(params: {
+  measures: string[];
+  timeDimension: string;
+  dateRange: [string, string];
+  securityContext: { user_id: number; organisation_id: number };
+}): Promise<IntegrityCheckMeasureResult[]> {
+  const [rollup, source] = await Promise.all([
+    loadGranularityTotals(params.measures, params.timeDimension, params.dateRange, "day", params.securityContext),
+    loadGranularityTotals(params.measures, params.timeDimension, params.dateRange, "hour", params.securityContext),
+  ]);
+  return params.measures.map((m) => ({
+    measure: m,
+    rollupTotal: rollup[m] ?? null,
+    sourceTotal: source[m] ?? null,
+  }));
 }

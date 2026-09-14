@@ -65,3 +65,39 @@ export async function fetchPartitionHistory(): Promise<PartitionHistory[]> {
     await conn.end();
   }
 }
+
+// system.tables itself carries no row count (confirmed live: has_data is
+// just a boolean). The real count lives in system.partitions --
+// main_table_row_count, joined back to system.tables via index_id --
+// confirmed live against real production tables. A table's storage can
+// be split into multiple physical Cube Store partitions internally (seen
+// live: an old inactive one at 0 rows left over from before the current
+// generation became active, alongside the real active one) -- summing
+// over active = 'true' only avoids double-counting or picking up the
+// stale leftover. Keyed by the same "schema.table_name" shape as
+// PartitionHistory's logicalName and the tableName field
+// fetchPreAggregationPartitions() already returns per partition, so a
+// caller can join this back to either by that key with no extra parsing.
+export async function fetchTableRowCounts(): Promise<Map<string, number>> {
+  const conn = await mysql.createConnection({
+    host: CUBESTORE_HOST,
+    port: CUBESTORE_PORT,
+    connectTimeout: 10_000,
+  });
+  try {
+    const [rows] = await conn.query<mysql.RowDataPacket[]>(
+      `SELECT t.table_schema, t.table_name, SUM(p.main_table_row_count) as rowCount
+         FROM system.tables t
+         JOIN system.partitions p ON p.index_id = t.id
+        WHERE t.table_schema = 'prod_pre_aggregations' AND p.active = 'true'
+        GROUP BY t.table_schema, t.table_name`
+    );
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      counts.set(`${row.table_schema}.${row.table_name}`, Number(row.rowCount) || 0);
+    }
+    return counts;
+  } finally {
+    await conn.end();
+  }
+}

@@ -82,6 +82,21 @@ export const INDEX_HTML = `<!doctype html>
   .pill.type-agg { background: #3a2313; color: #fdba74; }
   .pill.type-other { background: #1a1d22; color: #9aa4b2; }
 
+  .partition-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .partition-actions button { background: #111318; border: 1px solid #23262b; color: #9aa4b2; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .partition-actions button:hover:not(:disabled) { border-color: #3b4252; color: #fff; }
+  .partition-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .integrity-form { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
+  .integrity-form > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #9aa4b2; }
+  .integrity-form input, .integrity-form select { background: #0b0d10; border: 1px solid #23262b; color: #e6e6e6; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .integrity-form .run-btn { align-self: flex-start; background: #123a20; border: 1px solid #4ade80; color: #4ade80; border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer; }
+  .integrity-form .run-btn:hover:not(:disabled) { background: #164a28; }
+  .integrity-form .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .measure-check-list { display: flex; flex-direction: column; gap: 4px; max-height: 160px; overflow-y: auto; border: 1px solid #23262b; border-radius: 6px; padding: 6px 8px; }
+  .measure-check-list .measure-check { display: flex; flex-direction: row; align-items: center; gap: 6px; font-size: 12px; color: #e6e6e6; }
+  tr.integrity-mismatch { background: rgba(248, 113, 113, 0.08); }
+
   /* Hand-rolled JS syntax highlighting (schema source view) -- no
      external highlighter dependency, keeps this a single embedded file. */
   .tok-comment { color: #6b7280; font-style: italic; }
@@ -275,6 +290,17 @@ export const INDEX_HTML = `<!doctype html>
 <script>
 async function getJSON(url) {
   const res = await fetch(url);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+  return body;
+}
+
+async function postJSON(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
   return body;
@@ -652,6 +678,11 @@ function openOverlay(preAggId, partition) {
     const value = /Start|End|At$/.test(key) ? fmtDate(partition[key]) : String(partition[key]);
     dl.append(el('dt', null, [label]), el('dd', null, [value]));
   }
+  if (partition.rowCount !== undefined) {
+    dl.append(el('dt', null, ['Row count']), el('dd', null, [
+      partition.rowCount == null ? 'unknown (Cube Store lookup failed)' : partition.rowCount.toLocaleString(),
+    ]));
+  }
   body.append(dl);
 
   body.append(el('div', { class: 'muted' }, ['Build history:']));
@@ -719,12 +750,276 @@ const COLUMNS = [
     filterValue: (r) => ((r.partition.versionEntries || []).length > 0 ? 'built' : 'empty'),
     formatValue: (v) => (v === 'built' ? 'built' : 'no data'),
   },
+  {
+    key: 'rowCount', label: 'Row count', defaultDir: 'desc',
+    sort: (r) => (r.partition.rowCount == null ? -1 : r.partition.rowCount),
+  },
 ];
 
 let preaggSortState = { key: 'lastUpdated', dir: 'desc' };
 let preaggColumnFilters = { preAggId: new Set(), tableName: new Set(), lastUpdated: new Set() };
 let preaggFilterUi = { openKey: null, search: '' };
 let preaggAllRows = [];
+
+// Per-partition (keyed by tableName) in-flight/settled rebuild state,
+// kept outside preaggAllRows so it survives the full re-renders that
+// every other interaction on this table already triggers (see the
+// comment above renderFilterBar). Never cleared automatically -- a
+// settled pill (done/failed) is left up until the next page load or the
+// next rebuild of that same partition, since it's exactly the kind of
+// thing you'd want to still see after walking away for a minute.
+const rebuildJobs = new Map();
+
+// Kicks off one partition's async rebuild job (see
+// triggerPreAggregationBuild's comment in shared/cubeApi.ts for why the
+// dateRange must be this partition's own buildRangeStart/buildRangeEnd,
+// never the whole pre-aggregation's range) and starts polling its token(s)
+// for completion. Confirmed before firing: this is a real Athena scan,
+// not a free/local operation.
+async function startRebuild(row) {
+  const partition = row.partition;
+  const tableName = partition.tableName;
+  if (!tableName || !partition.buildRangeStart || !partition.buildRangeEnd) return;
+
+  const ok = confirm(
+    'Rebuild ' + shortTableName(tableName) + '?\\n\\n' +
+    'Range: ' + partition.buildRangeStart + ' \\u2192 ' + partition.buildRangeEnd + '\\n\\n' +
+    'This triggers a full scan of the source data for this range (real cost, e.g. Athena). Continue?'
+  );
+  if (!ok) return;
+
+  rebuildJobs.set(tableName, { status: 'pending' });
+  renderPreaggTable();
+  try {
+    const resp = await postJSON('/api/pre-aggregations/rebuild', {
+      preAggregationId: row.preAggId,
+      dateRange: [partition.buildRangeStart, partition.buildRangeEnd],
+      dataSource: partition.dataSource,
+    });
+    const tokens = resp.tokens || [];
+    if (!tokens.length) throw new Error('cube_api did not return a job token');
+    rebuildJobs.set(tableName, { status: 'polling', tokens });
+    renderPreaggTable();
+    pollRebuildStatus(tableName, tokens);
+  } catch (e) {
+    rebuildJobs.set(tableName, { status: 'error', message: String(e.message || e) });
+    renderPreaggTable();
+  }
+}
+
+// Light polling loop against GET /api/pre-aggregations/rebuild-status --
+// see fetchRebuildJobStatus's comment in shared/cubeApi.ts for the
+// done/failure status-prefix convention. Re-fetches the partitions list
+// once a job settles successfully, so the row count / last-updated /
+// built pill for that row reflect the just-finished rebuild without
+// requiring a manual page reload.
+async function pollRebuildStatus(tableName, tokens) {
+  const job = rebuildJobs.get(tableName);
+  if (!job || job.status !== 'polling') return;
+  try {
+    const qs = tokens.map(t => 'token=' + encodeURIComponent(t)).join('&');
+    const resp = await getJSON('/api/pre-aggregations/rebuild-status?' + qs);
+    const statuses = resp.statuses || [];
+    const failed = statuses.find(s => (s.status || '').startsWith('failure'));
+    const allDone = statuses.length > 0 && statuses.every(s => (s.status || '').startsWith('done') || (s.status || '').startsWith('failure'));
+    if (failed) {
+      rebuildJobs.set(tableName, { status: 'error', message: failed.status, tokens });
+      renderPreaggTable();
+      return;
+    }
+    if (allDone) {
+      rebuildJobs.set(tableName, { status: 'done', tokens });
+      renderPreaggTable();
+      loadPreAggregations();
+      return;
+    }
+  } catch (e) {
+    rebuildJobs.set(tableName, { status: 'error', message: String(e.message || e), tokens });
+    renderPreaggTable();
+    return;
+  }
+  setTimeout(() => pollRebuildStatus(tableName, tokens), 4000);
+}
+
+function renderPartitionActionsCell(row) {
+  const tableName = row.partition.tableName;
+  const job = tableName ? rebuildJobs.get(tableName) : null;
+  const canRebuild = Boolean(row.partition.buildRangeStart && row.partition.buildRangeEnd);
+
+  const rebuildBtn = el('button', {}, [job && job.status === 'polling' ? 'Rebuilding\\u2026' : 'Rebuild']);
+  if (!canRebuild || (job && job.status === 'polling')) rebuildBtn.setAttribute('disabled', 'true');
+  if (!canRebuild) rebuildBtn.title = 'No build range for this partition yet -- nothing to rebuild.';
+  rebuildBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    startRebuild(row);
+  });
+
+  const verifyBtn = el('button', {}, ['Verify']);
+  verifyBtn.title = 'Compare this range at day (rollup) vs hour (source) granularity.';
+  verifyBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openIntegrityCheckForm(row);
+  });
+
+  const wrap = el('div', { class: 'partition-actions' }, [rebuildBtn, verifyBtn]);
+  if (job) {
+    const cls = job.status === 'done' ? 'status-success' : job.status === 'error' ? 'status-error' : 'status-pending';
+    const label = job.status === 'done' ? 'done'
+      : job.status === 'error' ? ('failed' + (job.message ? ': ' + job.message : ''))
+      : job.status === 'polling' ? 'in progress'
+      : 'queued';
+    wrap.append(el('span', { class: 'pill ' + cls }, [label]));
+  }
+  return wrap;
+}
+
+// Cached, since it's needed on every "Verify" click but never changes
+// within a page load -- the data model tab already fetches it separately
+// for its own display, this just avoids a duplicate round trip per click.
+let modelMetaPromise = null;
+function getModelMeta() {
+  if (!modelMetaPromise) {
+    modelMetaPromise = getJSON('/api/model/meta').catch(e => { modelMetaPromise = null; throw e; });
+  }
+  return modelMetaPromise;
+}
+
+function toDatetimeLocalValue(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+function renderIntegrityResults(results) {
+  const rows = (results || []).map(r => {
+    const rollup = r.rollupTotal, source = r.sourceTotal;
+    const diff = (rollup != null && source != null) ? (rollup - source) : null;
+    const mismatch = diff != null && Math.abs(diff) > 1e-9;
+    return el('tr', { class: mismatch ? 'integrity-mismatch' : '' }, [
+      el('td', null, [el('code', null, [r.measure])]),
+      el('td', { class: 'mono' }, [rollup == null ? '\\u2014' : rollup.toLocaleString()]),
+      el('td', { class: 'mono' }, [source == null ? '\\u2014' : source.toLocaleString()]),
+      el('td', { class: 'mono' }, [diff == null ? '\\u2014' : diff.toLocaleString()]),
+      el('td', null, [
+        rollup == null || source == null
+          ? ''
+          : el('span', { class: 'pill ' + (mismatch ? 'status-error' : 'status-success') }, [mismatch ? 'mismatch' : 'match']),
+      ]),
+    ]);
+  });
+  return el('table', null, [
+    el('tr', null, [
+      el('th', null, ['Measure']), el('th', null, ['Rollup (day)']), el('th', null, ['Source (hour)']),
+      el('th', null, ['Diff']), el('th', null, ['\\u00a0']),
+    ]),
+    ...rows,
+  ]);
+}
+
+// Reuses the shared partition-detail overlay (see openOverlay above) for a
+// small form instead: pick which measures/time dimension to compare (from
+// this partition's own cube, sourced live from /api/model/meta -- never
+// hand-typed field names), a date range (defaulted to this partition's own
+// buildRangeStart/buildRangeEnd), and which tenant to run as. organisation_id
+// and user_id are both required -- see runIntegrityCheck's comment in
+// shared/cubeApi.ts for why a placeholder tenant can't be used here, unlike
+// every other call this dashboard makes to cube_api.
+async function openIntegrityCheckForm(row) {
+  const cubeName = row.preAggId.split('.')[0];
+  const backdrop = document.getElementById('overlay-backdrop');
+  document.getElementById('overlay-title').textContent = 'Verify integrity \\u2014 ' + (shortTableName(row.partition.tableName) || row.preAggId);
+  const body = document.getElementById('overlay-body');
+  body.innerHTML = '';
+  body.append(el('div', { class: 'muted' }, ['Loading cube fields\\u2026']));
+  backdrop.hidden = false;
+
+  let meta;
+  try {
+    meta = await getModelMeta();
+  } catch (e) {
+    body.innerHTML = '';
+    body.append(errBox(e));
+    return;
+  }
+  if (document.getElementById('overlay-backdrop').hidden) return; // closed while loading
+
+  const cube = (meta.cubes || []).find(c => c.name === cubeName);
+  body.innerHTML = '';
+  if (!cube) {
+    body.append(el('div', { class: 'err' }, ['Cube "' + cubeName + '" not found in the live data model.']));
+    return;
+  }
+  const timeDims = (cube.dimensions || []).filter(d => d.type === 'time');
+  if (!timeDims.length) {
+    body.append(el('div', { class: 'err' }, ['Cube "' + cubeName + '" has no time dimension -- nothing to compare granularities on.']));
+    return;
+  }
+  if (!(cube.measures || []).length) {
+    body.append(el('div', { class: 'err' }, ['Cube "' + cubeName + '" has no measures.']));
+    return;
+  }
+
+  const timeDimSelect = el('select', null, timeDims.map(d => el('option', { value: d.name }, [d.name])));
+
+  const measureChecks = cube.measures.map(m => {
+    const cb = el('input', { type: 'checkbox', value: m.name });
+    return { name: m.name, checkbox: cb, row: el('label', { class: 'measure-check' }, [cb, el('code', null, [m.name])]) };
+  });
+
+  const startInput = el('input', { type: 'datetime-local' });
+  const endInput = el('input', { type: 'datetime-local' });
+  if (row.partition.buildRangeStart) startInput.value = toDatetimeLocalValue(row.partition.buildRangeStart);
+  if (row.partition.buildRangeEnd) endInput.value = toDatetimeLocalValue(row.partition.buildRangeEnd);
+
+  const orgInput = el('input', { type: 'number', min: '1', placeholder: 'e.g. 42' });
+  const userInput = el('input', { type: 'number', min: '1', placeholder: 'e.g. 7' });
+
+  const resultsHost = el('div', { class: 'integrity-results' });
+  const runBtn = el('button', { class: 'run-btn' }, ['Run check']);
+  runBtn.addEventListener('click', async () => {
+    const measures = measureChecks.filter(m => m.checkbox.checked).map(m => m.name);
+    resultsHost.innerHTML = '';
+    if (!measures.length) { resultsHost.append(el('div', { class: 'err' }, ['Pick at least one measure.'])); return; }
+    if (!startInput.value || !endInput.value) { resultsHost.append(el('div', { class: 'err' }, ['Pick a start and end date.'])); return; }
+    if (!orgInput.value || !userInput.value) {
+      resultsHost.append(el('div', { class: 'err' }, ['organisation_id and user_id are both required -- this runs the query as that real tenant, see README.']));
+      return;
+    }
+
+    runBtn.disabled = true;
+    resultsHost.append(el('div', { class: 'muted' }, ['Running\\u2026']));
+    try {
+      const resp = await postJSON('/api/pre-aggregations/integrity-check', {
+        measures,
+        timeDimension: timeDimSelect.value,
+        dateRange: [new Date(startInput.value).toISOString(), new Date(endInput.value).toISOString()],
+        organisationId: Number(orgInput.value),
+        userId: Number(userInput.value),
+      });
+      resultsHost.innerHTML = '';
+      resultsHost.append(renderIntegrityResults(resp.results));
+    } catch (e) {
+      resultsHost.innerHTML = '';
+      resultsHost.append(errBox(e));
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+
+  body.append(el('div', { class: 'integrity-form' }, [
+    el('div', { class: 'muted' }, ['Compares the same measures/date range at day granularity (rollup) vs hour granularity (source) -- a mismatch means the rollup is stale or incomplete.']),
+    el('label', null, ['Time dimension', timeDimSelect]),
+    el('div', { class: 'muted' }, ['Measures:']),
+    el('div', { class: 'measure-check-list' }, measureChecks.map(m => m.row)),
+    el('label', null, ['Start', startInput]),
+    el('label', null, ['End', endInput]),
+    el('label', null, ['organisation_id (required -- runs as this real tenant)', orgInput]),
+    el('label', null, ['user_id (required)', userInput]),
+    runBtn,
+    resultsHost,
+  ]));
+}
 
 function renderPreaggTable() {
   const host = document.getElementById('preagg-table-host');
@@ -740,14 +1035,18 @@ function renderPreaggTable() {
 
   const sorted = sortRows(rows, COLUMNS, preaggSortState);
 
-  const thead = el('tr', null, COLUMNS.map(col => {
-    const th = renderSortableHeaderCell(col, preaggSortState, renderPreaggTable);
-    if (col.filterValue) appendColumnFilterUI(th, col, preaggAllRows, COLUMNS, preaggColumnFilters, preaggFilterUi, renderPreaggTable);
-    return th;
-  }));
+  const thead = el('tr', null, [
+    ...COLUMNS.map(col => {
+      const th = renderSortableHeaderCell(col, preaggSortState, renderPreaggTable);
+      if (col.filterValue) appendColumnFilterUI(th, col, preaggAllRows, COLUMNS, preaggColumnFilters, preaggFilterUi, renderPreaggTable);
+      return th;
+    }),
+    el('th', null, ['Actions']),
+  ]);
 
   const tbody = sorted.map(row => {
     const built = (row.partition.versionEntries || []).length > 0;
+    const rowCount = row.partition.rowCount;
     const tr = el('tr', null, [
       el('td', null, [row.preAggId]),
       el('td', { class: 'mono' }, [shortTableName(row.partition.tableName)]),
@@ -757,8 +1056,13 @@ function renderPreaggTable() {
         fmtDate(lastUpdated(row.partition)) || '\\u2014',
         el('span', { class: 'pill ' + (built ? 'built' : 'empty') }, [built ? 'built' : 'no data']),
       ]),
+      el('td', { class: 'mono' }, [rowCount == null ? '\\u2014' : rowCount.toLocaleString()]),
+      el('td', null, [renderPartitionActionsCell(row)]),
     ]);
-    tr.addEventListener('click', () => openOverlay(row.preAggId, row.partition));
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('.partition-actions')) return;
+      openOverlay(row.preAggId, row.partition);
+    });
     return tr;
   });
 
