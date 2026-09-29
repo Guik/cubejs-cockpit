@@ -89,7 +89,9 @@ export const INDEX_HTML = `<!doctype html>
 
   .integrity-form { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
   .integrity-form > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #9aa4b2; }
-  .integrity-form input, .integrity-form select { background: #0b0d10; border: 1px solid #23262b; color: #e6e6e6; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .integrity-form input, .integrity-form select, .integrity-form textarea { background: #0b0d10; border: 1px solid #23262b; color: #e6e6e6; border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; }
+  .integrity-form textarea { font-family: ui-monospace, "SF Mono", Menlo, monospace; resize: vertical; }
+  .integrity-form .field-hint { font-size: 11px; margin: -2px 0 2px; }
   .integrity-form .run-btn { align-self: flex-start; background: #123a20; border: 1px solid #4ade80; color: #4ade80; border-radius: 6px; padding: 6px 14px; font-size: 12px; cursor: pointer; }
   .integrity-form .run-btn:hover:not(:disabled) { background: #164a28; }
   .integrity-form .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -921,10 +923,15 @@ function renderIntegrityResults(results) {
 // small form instead: pick which measures/time dimension to compare (from
 // this partition's own cube, sourced live from /api/model/meta -- never
 // hand-typed field names), a date range (defaulted to this partition's own
-// buildRangeStart/buildRangeEnd), and which tenant to run as. organisation_id
-// and user_id are both required -- see runIntegrityCheck's comment in
-// shared/cubeApi.ts for why a placeholder tenant can't be used here, unlike
-// every other call this dashboard makes to cube_api.
+// buildRangeStart/buildRangeEnd), and a security context to run the query
+// as. That last one is a raw JSON object, not dedicated fields for any
+// particular claim -- which claims a queryRewrite needs (if any) to scope
+// a query to a real tenant is entirely each deployment's own schema to
+// define, so this dashboard can't assume a shape like {organisation_id,
+// user_id} any more than it can assume a cube is called "Orders". Left as
+// {} by default (no row-level security); cube_api's own queryRewrite is
+// what rejects the request, with its own error message, if the target
+// schema requires claims that aren't there.
 async function openIntegrityCheckForm(row) {
   const cubeName = row.preAggId.split('.')[0];
   const backdrop = document.getElementById('overlay-backdrop');
@@ -972,8 +979,14 @@ async function openIntegrityCheckForm(row) {
   if (row.partition.buildRangeStart) startInput.value = toDatetimeLocalValue(row.partition.buildRangeStart);
   if (row.partition.buildRangeEnd) endInput.value = toDatetimeLocalValue(row.partition.buildRangeEnd);
 
-  const orgInput = el('input', { type: 'number', min: '1', placeholder: 'e.g. 42' });
-  const userInput = el('input', { type: 'number', min: '1', placeholder: 'e.g. 7' });
+  // Remembered per-browser, not per-partition -- an ops person checking
+  // several partitions in a row is almost always running as the same
+  // tenant/security context each time, so this avoids retyping it. Purely
+  // a convenience default: never assumed valid, always re-parsed and
+  // re-validated on submit below.
+  let savedContext = '{}';
+  try { savedContext = localStorage.getItem('integrity-check-security-context') || '{}'; } catch (e) { /* ignore */ }
+  const contextInput = el('textarea', { rows: '3', spellcheck: 'false' }, [savedContext]);
 
   const resultsHost = el('div', { class: 'integrity-results' });
   const runBtn = el('button', { class: 'run-btn' }, ['Run check']);
@@ -982,10 +995,16 @@ async function openIntegrityCheckForm(row) {
     resultsHost.innerHTML = '';
     if (!measures.length) { resultsHost.append(el('div', { class: 'err' }, ['Pick at least one measure.'])); return; }
     if (!startInput.value || !endInput.value) { resultsHost.append(el('div', { class: 'err' }, ['Pick a start and end date.'])); return; }
-    if (!orgInput.value || !userInput.value) {
-      resultsHost.append(el('div', { class: 'err' }, ['organisation_id and user_id are both required -- this runs the query as that real tenant, see README.']));
+
+    let securityContext;
+    try {
+      securityContext = contextInput.value.trim() ? JSON.parse(contextInput.value) : {};
+      if (typeof securityContext !== 'object' || securityContext === null || Array.isArray(securityContext)) throw new Error('not an object');
+    } catch (e) {
+      resultsHost.append(el('div', { class: 'err' }, ['Security context must be a valid JSON object, e.g. {} or {"organisation_id": 42}.']));
       return;
     }
+    try { localStorage.setItem('integrity-check-security-context', contextInput.value); } catch (e) { /* ignore */ }
 
     runBtn.disabled = true;
     resultsHost.append(el('div', { class: 'muted' }, ['Running\\u2026']));
@@ -994,8 +1013,7 @@ async function openIntegrityCheckForm(row) {
         measures,
         timeDimension: timeDimSelect.value,
         dateRange: [new Date(startInput.value).toISOString(), new Date(endInput.value).toISOString()],
-        organisationId: Number(orgInput.value),
-        userId: Number(userInput.value),
+        securityContext,
       });
       resultsHost.innerHTML = '';
       resultsHost.append(renderIntegrityResults(resp.results));
@@ -1014,8 +1032,11 @@ async function openIntegrityCheckForm(row) {
     el('div', { class: 'measure-check-list' }, measureChecks.map(m => m.row)),
     el('label', null, ['Start', startInput]),
     el('label', null, ['End', endInput]),
-    el('label', null, ['organisation_id (required -- runs as this real tenant)', orgInput]),
-    el('label', null, ['user_id (required)', userInput]),
+    el('label', null, [
+      'Security context (JSON)',
+      el('div', { class: 'muted field-hint' }, ['Whatever claims your queryRewrite needs to scope this to a real tenant, e.g. {"organisation_id": 42, "user_id": 7}. Leave as {} if your schema has no row-level security.']),
+      contextInput,
+    ]),
     runBtn,
     resultsHost,
   ]));

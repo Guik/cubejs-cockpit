@@ -124,10 +124,13 @@ export const rebuildStatus = api.raw(
 );
 
 // Productizes this week's manual day-vs-hour diagnostic -- see
-// runIntegrityCheck's comment in shared/cubeApi.ts. organisationId/userId
-// are required, not optional: this project's queryRewrite rejects any
-// query whose security context has either at 0/missing, and a real
-// tenant is exactly the point (see that same comment for why).
+// runIntegrityCheck's comment in shared/cubeApi.ts. securityContext is an
+// arbitrary claims object, not a fixed shape: which claims (if any) a
+// deployment's queryRewrite needs to scope a query to a real tenant is
+// entirely that deployment's own schema, not something this dashboard
+// can assume. Defaults to {} (no row-level security); if the target
+// schema requires specific claims, cube_api's own queryRewrite rejects
+// the query and that message is surfaced as-is below.
 export const integrityCheck = api.raw(
   { expose: true, method: "POST", path: "/api/pre-aggregations/integrity-check" },
   async (req, resp) => {
@@ -136,8 +139,7 @@ export const integrityCheck = api.raw(
         measures?: string[];
         timeDimension?: string;
         dateRange?: [string, string];
-        organisationId?: number;
-        userId?: number;
+        securityContext?: Record<string, unknown>;
       };
       if (!body.measures || !body.measures.length) {
         throw new Error("missing 'measures' (non-empty array of fully-qualified measure names)");
@@ -146,13 +148,14 @@ export const integrityCheck = api.raw(
       if (!body.dateRange || body.dateRange.length !== 2) {
         throw new Error("missing or invalid 'dateRange' -- expected [start, end]");
       }
-      if (!body.organisationId) throw new Error("missing 'organisationId' -- must be a real tenant, see README");
-      if (!body.userId) throw new Error("missing 'userId' -- must be a real tenant, see README");
+      if (body.securityContext !== undefined && (typeof body.securityContext !== "object" || body.securityContext === null || Array.isArray(body.securityContext))) {
+        throw new Error("'securityContext' must be a JSON object, e.g. {} or {\"organisation_id\": 42}");
+      }
       const results = await runIntegrityCheck({
         measures: body.measures,
         timeDimension: body.timeDimension,
         dateRange: body.dateRange,
-        securityContext: { user_id: body.userId, organisation_id: body.organisationId },
+        securityContext: body.securityContext || {},
       });
       sendJson(resp, 200, { results });
     } catch (e) {

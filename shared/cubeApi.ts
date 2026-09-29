@@ -35,25 +35,29 @@ function signJwt(payload: object, secret: string, alg: "HS512" | "HS256"): strin
 }
 
 // Mints a short-lived JWT for the regular /cubejs-api/v1/* endpoints.
-// user_id/organisation_id are required by this project's queryRewrite
-// (cube.js, in the sibling git_cube repo) but /v1/meta doesn't apply
-// row-level filtering, so the placeholder 0/0 default works fine there --
-// this is the shape every existing caller (fetchMeta) relies on, never
-// used to run a real tenant's query.
+// /v1/meta doesn't apply row-level filtering, so every existing caller
+// (fetchMeta) mints with no extra claims at all -- fine regardless of
+// what a given deployment's queryRewrite happens to check for, since
+// meta never reaches queryRewrite in the first place.
 //
-// securityContext lets a caller mint a token scoped to a REAL tenant
-// instead, for the one caller that actually runs a data query:
-// runIntegrityCheck below. queryRewrite rejects the query outright if
-// either claim is falsy (`!securityContext.user_id` / `!organisation_id`,
-// confirmed by reading cube.js directly) and otherwise unconditionally
-// filters every query to that organisation_id -- so the placeholder
-// would silently compare two empty/wrong result sets rather than the
-// tenant's actual data. Minting with a real context is the same trust
-// boundary as any real end-user token for that org, not a queryRewrite
-// bypass (unlike mintSystemToken below).
+// securityContext is for the one caller that actually runs a data query
+// (runIntegrityCheck below): it's forwarded into the JWT payload
+// verbatim, as arbitrary claims, NOT a fixed {user_id, organisation_id}
+// shape -- this dashboard is meant to sit in front of any Cube
+// deployment, and queryRewrite's row-level-security claims are entirely
+// that deployment's own schema to define (field names, how many, or
+// none at all). A deployment whose queryRewrite requires specific
+// claims to be present/truthy (this project's own does, for
+// organisation_id/user_id -- see cube.js in the sibling git_cube repo)
+// will reject a query minted without them, the same way it would reject
+// any real end-user token missing those claims; that's a property of
+// the target deployment, not something to hardcode here. Minting with a
+// real security context is the same trust boundary as any real
+// end-user token, not a queryRewrite bypass (unlike mintSystemToken
+// below).
 export function mintApiToken(
   ttlSeconds = 300,
-  securityContext?: { user_id: number; organisation_id: number }
+  securityContext?: Record<string, unknown>
 ): string {
   const secret = process.env.CUBEJS_API_SECRET;
   if (!secret) {
@@ -62,12 +66,11 @@ export function mintApiToken(
   const now = Math.floor(Date.now() / 1000);
   return signJwt(
     {
+      ...securityContext,
       iat: now,
       iss: "cubejs-cockpit",
       nbf: now,
       exp: now + ttlSeconds,
-      user_id: securityContext?.user_id ?? 0,
-      organisation_id: securityContext?.organisation_id ?? 0,
     },
     secret,
     "HS512"
@@ -241,7 +244,7 @@ async function loadGranularityTotals(
   timeDimension: string,
   dateRange: [string, string],
   granularity: "day" | "hour",
-  securityContext: { user_id: number; organisation_id: number }
+  securityContext: Record<string, unknown>
 ): Promise<Record<string, number | null>> {
   const result = (await request("/cubejs-api/v1/load", {
     method: "POST",
@@ -275,22 +278,28 @@ export interface IntegrityCheckMeasureResult {
 }
 
 // Productizes this week's manual diagnostic (see the plan): the same
-// measures/time dimension/date range/tenant, queried twice through
-// Cube's stable, publicly documented /cubejs-api/v1/load -- 'day'
-// granularity (routes through a covering rollup pre-aggregation when one
-// exists) vs 'hour' (finer than any rollup this schema defines, so Cube
-// always falls back to source). A mismatch between the two totals for
-// the same measure is exactly the silent-failure signal both of this
-// week's incidents needed a manual curl comparison to find.
+// measures/time dimension/date range/security context, queried twice
+// through Cube's stable, publicly documented /cubejs-api/v1/load --
+// 'day' granularity (routes through a covering rollup pre-aggregation
+// when one exists) vs 'hour' (finer than any rollup this schema
+// defines, so Cube always falls back to source). A mismatch between the
+// two totals for the same measure is exactly the silent-failure signal
+// both of this week's incidents needed a manual curl comparison to
+// find.
 //
-// securityContext must be a REAL tenant's {user_id, organisation_id} --
-// see mintApiToken's comment above for why a placeholder would silently
-// compare two empty/wrong result sets instead of real data.
+// securityContext is passed straight through to mintApiToken -- see its
+// comment for why this is an arbitrary claims object, not a fixed
+// {user_id, organisation_id} shape: whether a real tenant is even
+// required, and which claims identify one, is entirely up to the target
+// deployment's own queryRewrite. Pass {} for a deployment with no
+// row-level security; cube_api itself will reject the query with a
+// clear error if the target schema requires claims that aren't there,
+// the same way it would for a real end-user token missing them.
 export async function runIntegrityCheck(params: {
   measures: string[];
   timeDimension: string;
   dateRange: [string, string];
-  securityContext: { user_id: number; organisation_id: number };
+  securityContext: Record<string, unknown>;
 }): Promise<IntegrityCheckMeasureResult[]> {
   const [rollup, source] = await Promise.all([
     loadGranularityTotals(params.measures, params.timeDimension, params.dateRange, "day", params.securityContext),
