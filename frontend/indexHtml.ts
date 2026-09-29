@@ -2170,7 +2170,13 @@ let queryAllRows = [];
 // Server-side pagination: the API returns one page of rows plus the total
 // matching count. Column filters/sort above still apply client-side, but
 // only within the loaded page.
-const QUERY_PAGE_SIZE = 200;
+// Rows per page is user-adjustable (server clamps to 1-1000) and remembered.
+const QUERY_PAGE_SIZE_MAX = 1000;
+let queryPageSize = 200;
+try {
+  const storedSize = Number(localStorage.getItem('qh-query-page-size'));
+  if (storedSize >= 1 && storedSize <= QUERY_PAGE_SIZE_MAX) queryPageSize = Math.floor(storedSize);
+} catch (e) { /* ignore */ }
 let queryPage = 0;
 let queryTotal = 0;
 let queryParamsKey = null;
@@ -2181,9 +2187,8 @@ function renderQueryTable(rows) {
 }
 
 function renderQueryPager() {
-  const pages = Math.max(1, Math.ceil(queryTotal / QUERY_PAGE_SIZE));
-  if (pages <= 1) return null;
-  const from = queryPage * QUERY_PAGE_SIZE + 1;
+  const pages = Math.max(1, Math.ceil(queryTotal / queryPageSize));
+  const from = queryPage * queryPageSize + 1;
   const to = Math.min(queryTotal, from + queryAllRows.length - 1);
   const go = (p) => { queryPage = p; loadQueryTable(); };
   const prev = el('button', { class: 'pager-btn' }, ['\\u2039 Prev']);
@@ -2192,7 +2197,23 @@ function renderQueryPager() {
   next.disabled = queryPage >= pages - 1;
   prev.addEventListener('click', () => go(queryPage - 1));
   next.addEventListener('click', () => go(queryPage + 1));
+
+  const sizeInput = el('input', { type: 'number', min: '1', max: String(QUERY_PAGE_SIZE_MAX), list: 'query-page-size-options', style: 'width:72px' }, []);
+  sizeInput.value = String(queryPageSize);
+  const datalist = el('datalist', { id: 'query-page-size-options' }, [50, 100, 200, 500, 1000].map(n => el('option', { value: String(n) }, [])));
+  sizeInput.addEventListener('change', () => {
+    const n = Math.floor(Number(sizeInput.value));
+    if (!(n >= 1)) { sizeInput.value = String(queryPageSize); return; }
+    queryPageSize = Math.min(n, QUERY_PAGE_SIZE_MAX);
+    try { localStorage.setItem('qh-query-page-size', String(queryPageSize)); } catch (e) { /* ignore */ }
+    queryPage = 0;
+    loadQueryTable();
+  });
+
   return el('div', { class: 'pager', style: 'display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px' }, [
+    el('span', { class: 'muted' }, ['Rows per page']),
+    sizeInput,
+    datalist,
     el('span', { class: 'muted' }, [from + '\\u2013' + to + ' of ' + queryTotal + ' \\u00b7 page ' + (queryPage + 1) + '/' + pages]),
     prev,
     next,
@@ -2251,8 +2272,8 @@ async function loadQueryTable() {
     // Any change to search / time range / origin starts back at page 1.
     const key = params.toString();
     if (key !== queryParamsKey) { queryPage = 0; queryParamsKey = key; }
-    params.set('limit', String(QUERY_PAGE_SIZE));
-    params.set('offset', String(queryPage * QUERY_PAGE_SIZE));
+    params.set('limit', String(queryPageSize));
+    params.set('offset', String(queryPage * queryPageSize));
     const data = await getJSON('/api/query-history?' + params.toString());
     queryTotal = data.total || 0;
     renderQueryTable(data.rows || []);
