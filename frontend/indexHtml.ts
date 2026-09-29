@@ -2167,10 +2167,36 @@ let querySortState = { key: 'startedAt', dir: 'desc' };
 let queryColumnFilters = { status: new Set(), source: new Set(), apiType: new Set() };
 let queryFilterUi = { openKey: null, search: '' };
 let queryAllRows = [];
+// Server-side pagination: the API returns one page of rows plus the total
+// matching count. Column filters/sort above still apply client-side, but
+// only within the loaded page.
+const QUERY_PAGE_SIZE = 200;
+let queryPage = 0;
+let queryTotal = 0;
+let queryParamsKey = null;
 
 function renderQueryTable(rows) {
   queryAllRows = rows;
   renderQueryTableFiltered();
+}
+
+function renderQueryPager() {
+  const pages = Math.max(1, Math.ceil(queryTotal / QUERY_PAGE_SIZE));
+  if (pages <= 1) return null;
+  const from = queryPage * QUERY_PAGE_SIZE + 1;
+  const to = Math.min(queryTotal, from + queryAllRows.length - 1);
+  const go = (p) => { queryPage = p; loadQueryTable(); };
+  const prev = el('button', { class: 'pager-btn' }, ['\\u2039 Prev']);
+  const next = el('button', { class: 'pager-btn' }, ['Next \\u203a']);
+  prev.disabled = queryPage <= 0;
+  next.disabled = queryPage >= pages - 1;
+  prev.addEventListener('click', () => go(queryPage - 1));
+  next.addEventListener('click', () => go(queryPage + 1));
+  return el('div', { class: 'pager', style: 'display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px' }, [
+    el('span', { class: 'muted' }, [from + '\\u2013' + to + ' of ' + queryTotal + ' \\u00b7 page ' + (queryPage + 1) + '/' + pages]),
+    prev,
+    next,
+  ]);
 }
 
 function renderQueryTableFiltered() {
@@ -2184,7 +2210,9 @@ function renderQueryTableFiltered() {
   }
   const filtered = queryAllRows.filter(r => rowMatchesColumnFilters(r, QUERY_COLUMNS, queryColumnFilters));
   if (!filtered.length) {
-    host.append(el('div', { class: 'muted' }, ['No queries match the current filters.']));
+    host.append(el('div', { class: 'muted' }, ['No queries match the current filters on this page.']));
+    const pagerEmpty = renderQueryPager();
+    if (pagerEmpty) host.append(pagerEmpty);
     return;
   }
   const rows = sortRows(filtered, QUERY_COLUMNS, querySortState);
@@ -2209,6 +2237,8 @@ function renderQueryTableFiltered() {
     return tr;
   });
   host.append(el('table', null, [thead, ...tbody]));
+  const pager = renderQueryPager();
+  if (pager) host.append(pager);
 }
 
 async function loadQueryTable() {
@@ -2218,8 +2248,13 @@ async function loadQueryTable() {
     if (queryFilterState.search) params.set('search', queryFilterState.search);
     applyTimeWindowToParams(params);
     params.set('origin', queryOriginState);
-    params.set('limit', '200');
+    // Any change to search / time range / origin starts back at page 1.
+    const key = params.toString();
+    if (key !== queryParamsKey) { queryPage = 0; queryParamsKey = key; }
+    params.set('limit', String(QUERY_PAGE_SIZE));
+    params.set('offset', String(queryPage * QUERY_PAGE_SIZE));
     const data = await getJSON('/api/query-history?' + params.toString());
+    queryTotal = data.total || 0;
     renderQueryTable(data.rows || []);
   } catch (e) {
     host.innerHTML = '';
