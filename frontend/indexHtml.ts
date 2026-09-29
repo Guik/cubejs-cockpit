@@ -2186,7 +2186,7 @@ function renderQueryTable(rows) {
   renderQueryTableFiltered();
 }
 
-function renderQueryPager() {
+function renderQueryPager(atTop) {
   const pages = Math.max(1, Math.ceil(queryTotal / queryPageSize));
   const from = queryPage * queryPageSize + 1;
   const to = Math.min(queryTotal, from + queryAllRows.length - 1);
@@ -2210,10 +2210,10 @@ function renderQueryPager() {
     loadQueryTable();
   });
 
-  return el('div', { class: 'pager', style: 'display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px' }, [
+  return el('div', { class: 'pager', style: 'display:flex;gap:12px;align-items:center;justify-content:flex-end;' + (atTop ? 'margin-bottom:12px' : 'margin-top:12px') }, [
     el('span', { class: 'muted' }, ['Rows per page']),
     sizeInput,
-    datalist,
+    ...(atTop ? [] : [datalist]),
     el('span', { class: 'muted' }, [from + '\\u2013' + to + ' of ' + queryTotal + ' \\u00b7 page ' + (queryPage + 1) + '/' + pages]),
     prev,
     next,
@@ -2231,6 +2231,8 @@ function renderQueryTableFiltered() {
   }
   const filtered = queryAllRows.filter(r => rowMatchesColumnFilters(r, QUERY_COLUMNS, queryColumnFilters));
   if (!filtered.length) {
+    const pagerTopEmpty = renderQueryPager(true);
+    if (pagerTopEmpty) host.append(pagerTopEmpty);
     host.append(el('div', { class: 'muted' }, ['No queries match the current filters on this page.']));
     const pagerEmpty = renderQueryPager();
     if (pagerEmpty) host.append(pagerEmpty);
@@ -2257,6 +2259,8 @@ function renderQueryTableFiltered() {
     tr.addEventListener('click', () => openQueryOverlay(row));
     return tr;
   });
+  const pagerTop = renderQueryPager(true);
+  if (pagerTop) host.append(pagerTop);
   host.append(el('table', null, [thead, ...tbody]));
   const pager = renderQueryPager();
   if (pager) host.append(pager);
